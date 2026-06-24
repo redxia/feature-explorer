@@ -1,0 +1,178 @@
+universe:
+  asset_class: equity   # 'crypto' | 'equity'
+  quote_asset: USD
+
+  # ---- crypto block (active when asset_class = crypto) ----
+  assets:
+    - BTC
+    - ETH
+    - XRP
+  tradable_pairs:
+    - BTC/USD
+    - ETH/USD
+    - XRP/USD
+  banned_quote_assets:
+    - USDT
+    - USDC
+    - BUSD
+    - DAI
+    - FDUSD
+    - TUSD
+
+  # ---- equity block (active when asset_class = equity) ----
+  equity:
+    rth_only: true
+    rth_start_et: "09:30"
+    rth_end_et: "16:00"
+    allow_short: true
+    htb_filter: none           # 'none' | 'easy_to_borrow_only'
+    short_borrow_apr: 0.0025   # 0.25% annualized flat for backtest
+
+    # top 100 S&P 500 by market cap, snapshot 2026-04-27 (mega/large cap)
+    sp100:
+      - AAPL
+      - MSFT
+      - NVDA
+      - GOOGL
+      - GOOG
+      - AMZN
+      - META
+      - BRK.B
+      - LLY
+      - AVGO
+      - JPM
+      - TSLA
+      - WMT
+      - V
+      - UNH
+      - XOM
+      - MA
+      - PG
+      - JNJ
+      - HD
+      - COST
+      - ORCL
+      - ABBV
+      - BAC
+      - NFLX
+      - CVX
+      - KO
+      - MRK
+      - CRM
+      - AMD
+      - PEP
+      - ADBE
+      - WFC
+      - TMO
+      - LIN
+      - CSCO
+      - ACN
+      - MCD
+      - DIS
+      - ABT
+      - TMUS
+      - INTU
+      - DHR
+      - IBM
+      - GE
+      - QCOM
+      - AXP
+      - VZ
+      - NOW
+      - TXN
+      - CAT
+      - PFE
+      - ISRG
+      - PM
+      - CMCSA
+      - GS
+      - AMGN
+      - SPGI
+      - MS
+      - UBER
+      - RTX
+      - NEE
+      - PGR
+      - UNP
+      - HON
+      - LOW
+      - T
+      - BLK
+      - ETN
+      - C
+      - SYK
+      - TJX
+      - SCHW
+      - DE
+      - BKNG
+      - PANW
+      - BA
+      - VRTX
+      - MDT
+      - ELV
+      - LMT
+      - GILD
+      - MMC
+      - PLD
+      - ANET
+      - ADP
+      - CB
+      - SBUX
+      - ADI
+      - BMY
+      - MU
+      - REGN
+      - INTC
+      - AMAT
+      - CI
+      - TMUS
+      - LRCX
+      - NKE
+      - KKR
+      - SO
+      - DUK
+
+    broad_etfs:
+      - SPY
+      - QQQ
+      - IWM
+      - DIA
+      - VTI
+
+    sector_spdrs:
+      - XLK
+      - XLF
+      - XLE
+      - XLV
+      - XLI
+      - XLY
+      - XLP
+      - XLB
+      - XLU
+      - XLRE
+      - XLC
+
+    thematic_etfs:
+      - ARKK
+      - SOXX
+      - KWEB
+      - XBI
+      - SMH
+      - IBB
+      - JETS
+      - MTUM   # iShares MSCI USA Momentum Factor (factor ETF, ~2013+)
+      - IBIT   # iShares Bitcoin Trust (spot BTC, 2024-01+)
+
+    leveraged_etfs:
+      - TQQQ
+      - SQQQ
+      - SPXL
+      - SPXS
+      - SOXL
+      - SOXS
+      - UPRO
+      - SPXU
+      - TNA
+      - TZA
+      - LABU
+      - LABD

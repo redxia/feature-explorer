@@ -10,3 +10,4 @@ pyyaml>=6.0
 yfinance>=0.2.40
 requests>=2.31
 matplotlib>=3.7
+statsmodels>=0.14

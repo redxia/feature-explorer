@@ -104,6 +104,19 @@ auto_retrain = st.sidebar.checkbox(
     help="If checked, every symbol with an existing trained pickle in "
          "models/lgbm_dash/ will be retrained on the fresh panel. ~30-90s per symbol.",
 )
+_trained_now = []
+try:
+    from src.research import lgbm_dash_model as _lgbm_list
+    _trained_now = _lgbm_list.list_trained()
+except Exception:
+    pass
+skip_retrain = st.sidebar.multiselect(
+    "Skip these on auto-retrain (faster)",
+    options=_trained_now,
+    default=["SPY"] if "SPY" in _trained_now else [],
+    help="Symbols listed here keep their existing model on refresh. "
+         "Skipping SPY ~halves retrain time when only SPY+QQQ are trained.",
+)
 refresh_years = st.sidebar.number_input(
     "Years of history", min_value=5, max_value=30, value=20, step=1
 )
@@ -179,7 +192,8 @@ if st.sidebar.button("🔄 Refresh data from yfinance", use_container_width=True
     if auto_retrain:
         try:
             from src.research import lgbm_dash_model as _lgbm
-            trained_syms = _lgbm.list_trained()
+            trained_syms = [s for s in _lgbm.list_trained() if s not in set(skip_retrain)]
+            skipped = [s for s in _lgbm.list_trained() if s in set(skip_retrain)]
             if trained_syms:
                 rt = st.sidebar.progress(
                     0.0, text=f"Retraining {len(trained_syms)} LightGBM models...")
@@ -191,8 +205,10 @@ if st.sidebar.button("🔄 Refresh data from yfinance", use_container_width=True
                     rt.progress((i + 1) / len(trained_syms),
                                 text=f"Retrained {s} ({i+1}/{len(trained_syms)})")
                 rt.empty()
-                st.sidebar.success(
-                    f"Retrained {len(trained_syms)} models: {', '.join(trained_syms)}")
+                msg = f"Retrained {len(trained_syms)}: {', '.join(trained_syms)}"
+                if skipped:
+                    msg += f" | skipped {', '.join(skipped)}"
+                st.sidebar.success(msg)
         except Exception as e:
             st.sidebar.warning(f"Auto-retrain skipped: {e}")
 
@@ -628,16 +644,25 @@ with tab_lgbm:
 
 **LightGBM (this) dashboard:**
 - Two models per (symbol, horizon):
-  - **Regressor** → predicts fwd log-return
+  - **Regressor** → predicts fwd log-return (Huber loss, robust to fat tails)
   - **Classifier** → predicts P(fwd > 0)
-- Inputs = all 25 features simultaneously (vol stack, RSI, MA distances, VIX, etc.).
+- Inputs = all features simultaneously (vol stack, RSI, MA distances, VIX, credit, rates).
 - **Tree-based gradient boosting:** captures interactions and non-linearity natively.
-  When two features are correlated, the model uses whichever splits better and
-  the other becomes near-zero importance — no double-counting.
-- **Walk-forward validation:** rolling 5y train, 60d test step. Each prediction
-  was made by a model that never saw the future. Honest OOS metrics shown so
-  you know how well each horizon's model actually predicts.
-- **Final inference model** fit on full history for live use.
+- **Low-complexity + seed-bagged (7 models averaged):** small trees
+  (num_leaves=15, depth≤4) plus bagging → smoother, less-noisy day-to-day signal.
+- **Purged + embargoed walk-forward:** a gap equal to the forecast horizon is
+  inserted between train-end and test-start, so a training row's forward target
+  can never overlap the test window. **This is the big fix** — without it, the
+  last horizon's worth of training rows leak the future and inflate IC/AUC.
+- **Expanding train window:** trains on all history up to the embargo boundary
+  (averages over multiple macro cycles, avoids stale-regime inversion).
+
+> ⚠️ **Reality check (post-purge).** Removing the overlap leak dropped 12-month
+> IC from a deceptive ~0.5 to roughly 0. **That earlier number was almost
+> entirely leakage.** Honest reading: single-symbol *directional* edge is weak
+> at all horizons; high `hit%` at long horizons is mostly the market's upward
+> drift, not skill. Use this as a regime gauge, not a precise forecaster — and
+> watch the Conviction metric, which now correctly collapses toward 0 when IC≈0.
 """)
 
     with st.expander("📐 What do IC, R², AUC, hit, Brier mean?", expanded=False):

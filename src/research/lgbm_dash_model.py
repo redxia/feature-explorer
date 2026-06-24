@@ -38,25 +38,74 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---- LightGBM hyperparameters ----
+# Lowered complexity vs v1 (num_leaves 63->15, min_child 80->200, depth cap)
+# because daily bars with multi-month overlapping forward targets give very few
+# *effective* independent samples. A deep tree memorizes -> jumpy predictions.
+# Huber loss on the regressor curbs magnitude overshoot (the negative-R2 problem).
 REG_PARAMS = dict(
-    n_estimators=400, learning_rate=0.03, num_leaves=63,
-    min_child_samples=80, subsample=0.8, colsample_bytree=0.7,
-    reg_alpha=0.1, reg_lambda=0.1, verbose=-1, n_jobs=-1,
+    n_estimators=300, learning_rate=0.02, num_leaves=15, max_depth=4,
+    min_child_samples=200, subsample=0.7, subsample_freq=1,
+    colsample_bytree=0.6, reg_alpha=0.3, reg_lambda=0.7,
+    objective="huber", alpha=0.9, verbose=-1, n_jobs=-1,
 )
 CLF_PARAMS = dict(
-    n_estimators=400, learning_rate=0.03, num_leaves=63,
-    min_child_samples=80, subsample=0.8, colsample_bytree=0.7,
-    reg_alpha=0.1, reg_lambda=0.1, verbose=-1, n_jobs=-1,
-    objective="binary",
+    n_estimators=300, learning_rate=0.02, num_leaves=15, max_depth=4,
+    min_child_samples=200, subsample=0.7, subsample_freq=1,
+    colsample_bytree=0.6, reg_alpha=0.3, reg_lambda=0.7,
+    objective="binary", verbose=-1, n_jobs=-1,
 )
+
+# Number of seed-bagged models averaged for the FINAL (live-inference) model.
+# Bagging reduces prediction variance -> smoother day-to-day signal.
+N_BAG = 7
+
+# Convert a forward horizon in trading-day bars to a calendar-day embargo gap
+# inserted between train-end and test-start in walk-forward, so training targets
+# never overlap the test window (purged CV, Lopez de Prado).
+def _embargo_days(h_bars: int) -> int:
+    return int(round(h_bars * 365.0 / 252.0)) + 2
+
+
+def _fit_bag_reg(X, y, n: int = N_BAG) -> list:
+    """Fit N seed-bagged regressors. Averaging their output reduces variance."""
+    models = []
+    for s in range(n):
+        p = {**REG_PARAMS, "random_state": s, "bagging_seed": s,
+             "feature_fraction_seed": s + 100}
+        models.append(lgb.LGBMRegressor(**p).fit(X, y))
+    return models
+
+
+def _fit_bag_clf(X, y, n: int = N_BAG) -> list:
+    models = []
+    for s in range(n):
+        p = {**CLF_PARAMS, "random_state": s, "bagging_seed": s,
+             "feature_fraction_seed": s + 100}
+        models.append(lgb.LGBMClassifier(**p).fit(X, y))
+    return models
+
+
+def _bag_predict_reg(models: list, X) -> np.ndarray:
+    return np.mean([m.predict(X) for m in models], axis=0)
+
+
+def _bag_predict_proba(models: list, X) -> np.ndarray:
+    return np.mean([m.predict_proba(X)[:, 1] for m in models], axis=0)
+
+
+def _avg_importance(models: list, feats: list) -> dict:
+    if not models:
+        return {}
+    arr = np.mean([m.feature_importances_ for m in models], axis=0)
+    return dict(zip(feats, arr.tolist()))
 
 
 @dataclass
 class HorizonModel:
     horizon: str
     bars: int
-    reg_model: Any = None        # LGBMRegressor
-    clf_model: Any = None        # LGBMClassifier
+    reg_models: list = field(default_factory=list)   # list[LGBMRegressor] (bagged)
+    clf_models: list = field(default_factory=list)   # list[LGBMClassifier] (bagged)
     # Regressor metrics
     ic_oos: float = float("nan")           # Spearman(reg_pred, fwd_ret)
     r2_oos: float = float("nan")           # r2_score(fwd_ret, reg_pred)
@@ -87,19 +136,35 @@ class SymbolBundle:
 
 def _walk_forward_oos(
     df: pd.DataFrame, target_col: str, classifier: bool,
-    train_days: int = 180 * 5, step_days: int = 60,  # ≈ 5y rolling train, 60d step (daily)
+    embargo_days: int,
+    warmup_days: int = 180 * 6, step_days: int = 60,  # ≈6y warmup, 60d step
+    expanding: bool = True,
 ) -> tuple[pd.Series, dict]:
-    """Walk-forward predictions on daily bars. Returns OOS pred series + metrics."""
+    """Purged walk-forward predictions on daily bars.
+
+    A gap of `embargo_days` is inserted between train-end and test-start so that
+    training samples (whose forward target reaches `embargo_days` ahead) never
+    overlap the test window. Without this, the last horizon's worth of training
+    rows leak future info into the test fold and inflate OOS metrics.
+
+    `expanding=True` trains on ALL history up to the embargo boundary (averages
+    over multiple macro cycles -> avoids the stale-regime inversion a short
+    rolling window suffers at long horizons). `warmup_days` is the minimum
+    history before the first test fold.
+    """
     df = df.sort_values("date").reset_index(drop=True)
     times = pd.to_datetime(df["timestamp"], utc=True)
     start_day = times.min().floor("D")
     end_day = times.max().floor("D")
     preds = pd.Series(np.nan, index=df.index, dtype=float)
+    embargo = pd.Timedelta(days=embargo_days)
 
-    cur = start_day + pd.Timedelta(days=train_days)
+    cur = start_day + pd.Timedelta(days=warmup_days)
     folds = 0
     while cur < end_day:
-        train_mask = (times >= cur - pd.Timedelta(days=train_days)) & (times < cur)
+        # Train ends embargo days BEFORE the test window opens (purge overlap).
+        lo = start_day if expanding else cur - pd.Timedelta(days=warmup_days)
+        train_mask = (times >= lo) & (times < cur - embargo)
         test_end = cur + pd.Timedelta(days=step_days)
         test_mask = (times >= cur) & (times < test_end)
         train = df.loc[train_mask].dropna(subset=FEATURES + [target_col])
@@ -126,7 +191,7 @@ def _walk_forward_oos(
 
 def train_symbol(
     symbol: str,
-    train_days: int = 180 * 5,  # 900 daily bars rolling train window
+    warmup_days: int = 180 * 6,  # min history before first OOS fold (expanding)
     step_days: int = 60,
 ) -> SymbolBundle:
     df = load_panel([symbol])
@@ -144,11 +209,14 @@ def train_symbol(
         target = f"fwd_{h_label}"
         if target not in df.columns:
             continue
-        # Walk-forward OOS
+        embargo_days = _embargo_days(h_bars)
+        # Walk-forward OOS (purged, expanding window)
         preds_reg, _ = _walk_forward_oos(df, target, classifier=False,
-                                         train_days=train_days, step_days=step_days)
+                                         embargo_days=embargo_days,
+                                         warmup_days=warmup_days, step_days=step_days)
         preds_clf, _ = _walk_forward_oos(df, target, classifier=True,
-                                         train_days=train_days, step_days=step_days)
+                                         embargo_days=embargo_days,
+                                         warmup_days=warmup_days, step_days=step_days)
         oos = df.assign(pred_reg=preds_reg, pred_clf=preds_clf).dropna(
             subset=["pred_reg", "pred_clf", target])
         if len(oos) < 50:
@@ -190,20 +258,19 @@ def train_symbol(
         except Exception:
             pseudo_r2 = float("nan")
 
-        # Final models on FULL history
+        # Final models on FULL history — seed-bagged for low-variance live signal
         final = df.dropna(subset=FEATURES + [target])
-        reg_full = lgb.LGBMRegressor(**REG_PARAMS).fit(final[FEATURES], final[target])
+        reg_models = _fit_bag_reg(final[FEATURES], final[target])
         y_full = (final[target] > 0).astype(int)
-        clf_full = (lgb.LGBMClassifier(**CLF_PARAMS).fit(final[FEATURES], y_full)
-                    if y_full.nunique() == 2 else None)
+        clf_models = (_fit_bag_clf(final[FEATURES], y_full)
+                      if y_full.nunique() == 2 else [])
 
-        fi_reg = dict(zip(FEATURES, reg_full.feature_importances_.tolist()))
-        fi_clf = (dict(zip(FEATURES, clf_full.feature_importances_.tolist()))
-                  if clf_full is not None else {})
+        fi_reg = _avg_importance(reg_models, FEATURES)
+        fi_clf = _avg_importance(clf_models, FEATURES)
 
         bundle.horizons[h_label] = HorizonModel(
             horizon=h_label, bars=h_bars,
-            reg_model=reg_full, clf_model=clf_full,
+            reg_models=reg_models, clf_models=clf_models,
             ic_oos=ic, r2_oos=r2, hit_oos=hit,
             auc_oos=auc, brier_oos=brier,
             ic_clf_oos=ic_clf, hit_clf_oos=hit_clf,
@@ -229,7 +296,7 @@ def _bundle_to_dict(b: SymbolBundle) -> dict:
         "horizons": {
             h: {
                 "horizon": m.horizon, "bars": m.bars,
-                "reg_model": m.reg_model, "clf_model": m.clf_model,
+                "reg_models": m.reg_models, "clf_models": m.clf_models,
                 "ic_oos": m.ic_oos, "r2_oos": m.r2_oos, "hit_oos": m.hit_oos,
                 "auc_oos": m.auc_oos, "brier_oos": m.brier_oos,
                 "ic_clf_oos": m.ic_clf_oos, "hit_clf_oos": m.hit_clf_oos,
@@ -252,9 +319,16 @@ def _dict_to_bundle(d: dict) -> SymbolBundle:
         panel_end=str(d.get("panel_end", "")),
     )
     for h, mh in d.get("horizons", {}).items():
+        # Backward-compat: old pickles stored single reg_model/clf_model.
+        reg_models = mh.get("reg_models")
+        if reg_models is None:
+            reg_models = [mh["reg_model"]] if mh.get("reg_model") is not None else []
+        clf_models = mh.get("clf_models")
+        if clf_models is None:
+            clf_models = [mh["clf_model"]] if mh.get("clf_model") is not None else []
         bundle.horizons[h] = HorizonModel(
             horizon=mh["horizon"], bars=mh["bars"],
-            reg_model=mh.get("reg_model"), clf_model=mh.get("clf_model"),
+            reg_models=reg_models, clf_models=clf_models,
             ic_oos=mh.get("ic_oos", float("nan")),
             r2_oos=mh.get("r2_oos", float("nan")),
             hit_oos=mh.get("hit_oos", float("nan")),
@@ -308,9 +382,9 @@ def predict_current(bundle: SymbolBundle, current_row: pd.Series) -> pd.DataFram
     X = pd.DataFrame([{f: float(current_row[f]) if not pd.isna(current_row.get(f))
                        else np.nan for f in feats}])
     for h, m in bundle.horizons.items():
-        if m.reg_model is None: continue
-        log_ret = float(m.reg_model.predict(X)[0])
-        p_pos = float(m.clf_model.predict_proba(X)[0, 1]) if m.clf_model is not None else float("nan")
+        if not m.reg_models: continue
+        log_ret = float(_bag_predict_reg(m.reg_models, X)[0])
+        p_pos = float(_bag_predict_proba(m.clf_models, X)[0]) if m.clf_models else float("nan")
         rows.append({
             "horizon": h,
             "bars": m.bars,
@@ -336,13 +410,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("symbols", nargs="*", default=["SPY"])
-    ap.add_argument("--train-days", type=int, default=900)
+    ap.add_argument("--warmup-days", type=int, default=180 * 6)
     ap.add_argument("--step-days", type=int, default=60)
     args = ap.parse_args()
     syms = args.symbols if args.symbols else ["SPY"]
     for s in syms:
         try:
-            b = train_symbol(s, train_days=args.train_days, step_days=args.step_days)
+            b = train_symbol(s, warmup_days=args.warmup_days, step_days=args.step_days)
             print(f"\n=== {s} trained, {len(b.horizons)} horizons, panel {b.panel_start}..{b.panel_end} ===")
             for h, m in b.horizons.items():
                 print(f"  {h}: IC={m.ic_oos:+.4f}  AUC={m.auc_oos:.3f}  hit={m.hit_oos:.3f}  n_oos={m.n_oos}")

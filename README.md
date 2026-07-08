@@ -97,3 +97,69 @@ Streamlit gives you a public `https://<app-name>.streamlit.app` link. That's you
 pip install -r requirements.txt
 streamlit run app/feature_explorer.py
 ```
+
+---
+
+## Automated daily refresh + retrain (GitHub Actions)
+
+The hosted Streamlit app is a **read-only viewer** — its disk is wiped on every
+reboot, so refreshing/retraining *in the app* does not persist (and on the app's
+Python build the retrain comes back empty). **Do not use the in-app
+"Refresh data / Auto-retrain" controls on the hosted app.**
+
+Instead, `.github/workflows/daily-update.yml` runs `scripts/daily_update.py`
+every weekday at **23:00 UTC** (after the US close) on a clean Python 3.11 runner:
+
+1. Re-fetches all daily bars + macro/vol sources (VIX, VIX3M, VVIX, MOVE, TNX,
+   IRX, TLT, HYG, LQD) from yfinance.
+2. Retrains every model in `models/lgbm_dash/` (QQQ, SPY).
+3. Commits the updated `data/raw/daily/*.parquet` and `models/lgbm_dash/*.pkl`
+   back to the repo — which automatically triggers a Streamlit Cloud redeploy.
+
+If a retrain produces **0 horizons**, the job fails on purpose and commits
+nothing, so a bad run can never overwrite your good models.
+
+### One-time setup
+1. Push these files (`scripts/`, `.github/`) to the repo (see commands below).
+2. On GitHub: **Settings -> Actions -> General -> Workflow permissions ->**
+   select **"Read and write permissions"** -> Save. (Lets the job push commits.)
+3. **Actions** tab -> **Daily data refresh + retrain** -> **Run workflow** to
+   test it immediately instead of waiting for the cron.
+
+### Run it manually anytime
+Actions tab -> select the workflow -> **Run workflow**. Takes ~15-25 min.
+
+### Note on repo size
+Each run commits ~98 MB of updated binaries, so git history grows over time.
+That's fine for months; if the repo gets large later, you can squash history or
+re-init the repo. Ask me and I'll set up a slimmer scheme (e.g. force-pushing a
+single data commit) if you want to avoid the growth entirely.
+
+---
+
+## The in-app "Refresh + retrain permanently" button
+
+Because Streamlit Cloud's disk is ephemeral, the app can't make a refresh stick on
+its own. The sidebar button **"♻️ Refresh + retrain permanently (GitHub)"** instead
+triggers the `daily-update.yml` workflow on GitHub, which fetches + retrains on
+Python 3.11 and commits — so the result is permanent and the app auto-redeploys.
+
+To enable it, add a GitHub token to the app's Secrets:
+
+1. GitHub -> your avatar -> **Settings -> Developer settings -> Personal access
+   tokens -> Fine-grained tokens -> Generate new token**.
+   - **Repository access:** only `redxia/feature-explorer`.
+   - **Permissions -> Repository -> Actions:** **Read and write**.
+   - (Contents can stay read-only; the workflow commits with its own token.)
+   - Generate and copy the token (starts with `github_pat_`).
+2. In the app: **Manage app -> Settings -> Secrets**, paste:
+   ```toml
+   GH_TOKEN = "github_pat_...."
+   GH_REPO  = "redxia/feature-explorer"
+   ```
+   Save. The app reboots.
+3. Also set repo **Settings -> Actions -> General -> Workflow permissions ->
+   "Read and write permissions"** so the workflow can push its commit.
+
+Now clicking the button (or the daily 23:00 UTC schedule) rebuilds data + models
+permanently. Each run takes ~15-25 min; the app updates automatically when done.

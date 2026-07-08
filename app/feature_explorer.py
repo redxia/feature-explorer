@@ -222,6 +222,55 @@ st.sidebar.caption(
     f"Last loaded: {pd.to_datetime(panel['date'].max()).date()}"
 )
 
+# ---------- permanent refresh + retrain (runs on GitHub Actions) ----------
+# Streamlit Cloud's disk is ephemeral, so to make a refresh PERMANENT we trigger
+# the repo's daily-update workflow. It fetches fresh data + retrains on Python
+# 3.11 and commits to the repo, which auto-redeploys this app. Needs a GitHub
+# token in app Secrets (GH_TOKEN). Same workflow also runs on a daily schedule.
+st.sidebar.markdown("---")
+st.sidebar.subheader("Permanent refresh + retrain")
+st.sidebar.caption(
+    "Runs the workflow on GitHub (Python 3.11): fetch fresh data, retrain, and "
+    "commit so it survives reboots. ~15-25 min, then the app auto-redeploys."
+)
+if st.sidebar.button("♻️ Refresh + retrain permanently (GitHub)",
+                     use_container_width=True):
+    import os
+    import requests
+    _tok = st.secrets.get("GH_TOKEN", os.environ.get("GH_TOKEN", ""))
+    _repo = st.secrets.get("GH_REPO", os.environ.get("GH_REPO",
+                                                     "redxia/feature-explorer"))
+    _wf = st.secrets.get("GH_WORKFLOW", os.environ.get("GH_WORKFLOW",
+                                                       "daily-update.yml"))
+    _branch = st.secrets.get("GH_BRANCH", os.environ.get("GH_BRANCH", "main"))
+    if not _tok:
+        st.sidebar.error(
+            "Add GH_TOKEN (a GitHub token with Actions read/write) to this "
+            "app's Secrets to enable permanent rebuilds.")
+    else:
+        try:
+            _r = requests.post(
+                f"https://api.github.com/repos/{_repo}/actions/workflows/"
+                f"{_wf}/dispatches",
+                headers={
+                    "Authorization": f"Bearer {_tok}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                json={"ref": _branch},
+                timeout=20,
+            )
+            if _r.status_code == 204:
+                st.sidebar.success(
+                    "Rebuild started on GitHub. It takes ~15-25 min; this app "
+                    "auto-redeploys with fresh data + model when it finishes. "
+                    "Watch progress on the repo's Actions tab.")
+            else:
+                st.sidebar.error(
+                    f"Dispatch failed ({_r.status_code}): {_r.text[:200]}")
+        except Exception as _e:
+            st.sidebar.error(f"Could not reach GitHub: {_e}")
+
 # ---------- tabs ----------
 
 tab_lgbm, tab_dash, tab_scatter, tab_scenario, tab_corr, tab_buckets = st.tabs([

@@ -2,9 +2,13 @@ name: Daily data refresh + retrain
 
 on:
   schedule:
-    # 23:00 UTC, Mon-Fri = ~6-7pm US Eastern, after the market close so the
-    # day's final daily bar is available from yfinance.
-    - cron: "0 23 * * 1-5"
+    # Fire ~20 min after the 4:00pm ET close. GitHub cron is UTC-only and can't
+    # track daylight saving, so we schedule BOTH: 20:20 UTC works in summer
+    # (EDT, close = 20:00 UTC) and 21:20 UTC works in winter (EST, close = 21:00
+    # UTC). Each day one run lands right after the close and the other is a
+    # harmless idempotent re-fetch of the same final bar.
+    - cron: "20 20 * * 1-5"   # ~4:20pm ET during EDT (summer)
+    - cron: "20 21 * * 1-5"   # ~4:20pm ET during EST (winter)
   workflow_dispatch:        # lets you run it manually from the Actions tab
 
 permissions:

@@ -37,14 +37,26 @@ st.set_page_config(page_title="Feature Explorer", layout="wide")
 
 # ---------- caching ----------
 
-@st.cache_data(show_spinner="Loading daily panel...", persist="disk")
-def cached_panel(symbols: tuple[str, ...]) -> pd.DataFrame:
+def _data_version() -> float:
+    """Max modification time across the daily parquet files. Changes whenever the
+    data is refreshed, so passing it into the cached loaders busts their cache the
+    moment new bars land — otherwise Streamlit keeps serving the stale panel."""
+    try:
+        from src.research.feature_panel import DAILY_DIR
+        return max((p.stat().st_mtime for p in DAILY_DIR.glob("*.parquet")),
+                   default=0.0)
+    except Exception:
+        return 0.0
+
+
+@st.cache_data(show_spinner="Loading daily panel...")
+def cached_panel(symbols: tuple[str, ...], version: float) -> pd.DataFrame:
     return load_panel(list(symbols))
 
 
-@st.cache_resource
-def cached_per_symbol(sym: str) -> pd.DataFrame:
-    """Per-symbol cache so adding a symbol to multiselect only rebuilds that one."""
+@st.cache_data(show_spinner="Loading symbol...")
+def cached_per_symbol(sym: str, version: float) -> pd.DataFrame:
+    """Per-symbol cache, keyed on data version so a refresh always reloads."""
     return load_panel([sym])
 
 
@@ -66,8 +78,25 @@ if not selected_syms:
     st.warning("Pick at least one symbol")
     st.stop()
 
-# Per-symbol cache; concat is fast vs reloading whole panel
-panel = pd.concat([cached_per_symbol(s) for s in selected_syms], ignore_index=True)
+# Per-symbol cache; concat is fast vs reloading whole panel.
+# _data_version() in the key forces a reload whenever the parquet files change.
+_ver = _data_version()
+panel = pd.concat([cached_per_symbol(s, _ver) for s in selected_syms],
+                  ignore_index=True)
+
+# ---------- data freshness banner ----------
+_latest = pd.to_datetime(panel["date"].max()).date()
+_today = pd.Timestamp.utcnow().normalize().date()
+_age = (_today - _latest).days
+if _age <= 1:
+    st.success(f"🟢 Latest bar: {_latest}  ·  data is current "
+               f"({_age} day{'s' if _age != 1 else ''} behind today {_today})")
+elif _age <= 4:
+    st.warning(f"🟡 Latest bar: {_latest}  ·  {_age} days behind today ({_today}). "
+               "Click ♻️ Refresh + retrain permanently, or wait for the daily run.")
+else:
+    st.error(f"🔴 Latest bar: {_latest}  ·  {_age} days stale (today {_today}). "
+             "The daily refresh may have failed — check the repo's Actions tab.")
 
 st.sidebar.header("Filters")
 min_date = pd.to_datetime(panel["date"].min())
@@ -1865,12 +1894,13 @@ with tab_regime:
     _msum = st.slider("MACD histogram running-sum window (days)", 3, 40, 10)
 
     @st.cache_data(show_spinner="Fitting HMM volatility regimes...")
-    def _cached_regimes(under, rv, mf, ms, msum):
+    def _cached_regimes(under, rv, mf, ms, msum, version):
         return _vr.fit_regimes(under, rv_window=rv, macd_fast=mf,
                                macd_slow=ms, macd_sum_window=msum)
 
     try:
-        res = _cached_regimes(_under, int(_rv), int(_mf), int(_ms), int(_msum))
+        res = _cached_regimes(_under, int(_rv), int(_mf), int(_ms), int(_msum),
+                              _data_version())
     except Exception as e:
         st.error(f"Could not fit regimes: {e}")
         st.stop()

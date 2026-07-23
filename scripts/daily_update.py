@@ -46,31 +46,22 @@ MACRO_SOURCES = {
 
 
 def refresh_macro() -> int:
+    """Fetch macro/vol sources through the resilient yfinance path (browser
+    impersonation + retries) so they update even from GitHub's runners."""
+    from src.data import fetch_yf_daily as ft
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
     written = 0
     for sym, yfsym in MACRO_SOURCES.items():
         try:
-            d = yf.download(yfsym, period="max", interval="1d",
-                            auto_adjust=False, progress=False, threads=False)
-            if isinstance(d.columns, pd.MultiIndex):
-                d.columns = [c[0] if isinstance(c, tuple) else c for c in d.columns]
-            if d is None or d.empty:
-                log.warning("%s: no data", sym)
+            raw = ft._yf_download(yfsym, "max", auto_adjust=False, tries=3)
+            df = ft._finalize(raw, sym)
+            if df.empty:
+                log.warning("macro %s: no data", sym)
                 continue
-            d = d.reset_index().rename(columns={
-                "Date": "timestamp", "Open": "open", "High": "high",
-                "Low": "low", "Close": "close", "Volume": "volume"})
-            d["timestamp"] = pd.to_datetime(d["timestamp"], utc=True)
-            d["symbol"] = sym
-            d["vwap_alpaca"] = np.nan
-            d["trade_count"] = np.nan
-            cols = ["timestamp", "symbol", "open", "high", "low", "close",
-                    "volume", "vwap_alpaca", "trade_count"]
-            d[[c for c in cols if c in d.columns]].to_parquet(
-                DAILY_DIR / f"{sym}.parquet", index=False)
+            df.to_parquet(DAILY_DIR / f"{sym}.parquet", index=False)
             written += 1
-            log.info("macro %s -> %d rows (last %s)", sym, len(d),
-                     pd.to_datetime(d["timestamp"]).max().date())
+            log.info("macro %s -> %d rows (last %s)", sym, len(df),
+                     df["timestamp"].iloc[-1].date())
         except Exception as e:
             log.warning("macro %s failed: %s", sym, e)
     return written

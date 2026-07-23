@@ -12,3 +12,4 @@ requests>=2.31
 matplotlib>=3.7
 statsmodels>=0.14
 hmmlearn>=0.3
+curl_cffi>=0.7

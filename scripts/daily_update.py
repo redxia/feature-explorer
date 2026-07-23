@@ -4,6 +4,10 @@ Run by GitHub Actions on a daily cron, then the workflow commits the updated
 data/raw/daily/*.parquet and models/lgbm_dash/*.pkl back to the repo, which
 triggers a Streamlit Cloud redeploy.
 
+Design: DATA refresh and RETRAIN are decoupled. Fresh data is always committable
+even if a retrain hiccups; and a bad retrain (throw or 0 horizons) restores the
+previous good model from a backup so it can never clobber a working pickle.
+
 Usage:
     python -m scripts.daily_update            # full universe + retrain all trained
     python -m scripts.daily_update --years 20
@@ -65,7 +69,8 @@ def refresh_macro() -> int:
             d[[c for c in cols if c in d.columns]].to_parquet(
                 DAILY_DIR / f"{sym}.parquet", index=False)
             written += 1
-            log.info("macro %s -> %d rows", sym, len(d))
+            log.info("macro %s -> %d rows (last %s)", sym, len(d),
+                     pd.to_datetime(d["timestamp"]).max().date())
         except Exception as e:
             log.warning("macro %s failed: %s", sym, e)
     return written
@@ -90,18 +95,34 @@ def refresh_universe(years: int) -> int:
 
 
 def retrain() -> list[str]:
+    """Retrain each model. train_symbol() overwrites the pickle itself, so we
+    back up the existing good pickle first and RESTORE it if the retrain throws
+    or yields 0 horizons — a bad retrain can never clobber a good model.
+    Never raises: data refresh must be committable even if retraining hiccups.
+    """
+    import shutil
     trained = lgbm.list_trained()
     done = []
     for s in trained:
+        pkl = lgbm.MODELS_DIR / f"{s}.pkl"
+        bak = lgbm.MODELS_DIR / f"{s}.pkl.bak"
         try:
+            if pkl.exists():
+                shutil.copy2(pkl, bak)
             b = lgbm.train_symbol(s)          # train_symbol() saves the pickle itself
             if b.horizons:
                 done.append(s)
                 log.info("retrained %s: %d horizons", s, len(b.horizons))
+                if bak.exists():
+                    bak.unlink()
             else:
-                log.error("retrain %s produced 0 horizons (kept old pickle? check data)", s)
+                log.error("retrain %s produced 0 horizons — restoring previous model", s)
+                if bak.exists():
+                    shutil.move(str(bak), str(pkl))
         except Exception as e:
-            log.exception("retrain %s failed: %s", s, e)
+            log.exception("retrain %s failed: %s — restoring previous model", s, e)
+            if bak.exists():
+                shutil.move(str(bak), str(pkl))
     return done
 
 
@@ -120,9 +141,20 @@ def main() -> int:
         log.info("=== retrain ===")
         done = retrain()
         if not done:
-            log.error("No models retrained successfully — failing job so the "
-                      "previous good pickles are NOT overwritten by empties.")
-            return 1
+            # Do NOT fail the job: fresh DATA must still be committed even if a
+            # retrain hiccups. Good models were restored from backup inside
+            # retrain(), so nothing is lost — we keep the previous models.
+            log.warning("No models retrained this run; keeping previous models. "
+                        "Fresh data will still be committed.")
+
+    # Report freshness so the Action log shows the latest bar date.
+    try:
+        import glob
+        latest = max(pd.to_datetime(pd.read_parquet(p)["timestamp"]).max()
+                     for p in glob.glob(str(DAILY_DIR / "*.parquet")))
+        log.info("latest bar across daily files: %s", latest.date())
+    except Exception:
+        pass
     log.info("done")
     return 0
 

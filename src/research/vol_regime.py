@@ -5,8 +5,9 @@ Features (all daily, from data/raw/daily/*.parquet, sourced from yfinance):
   - rv{N}        : realized volatility of the underlying (annualized std of
                    log returns over N trading days) — "historical standard deviation"
   - term_spread  : VIX3M - VIX  (3-month minus spot; <0 = backwardation/stress)
-  - macd_runsum  : rolling sum of the MACD histogram (fast/slow EMAs) of the
-                   underlying — a momentum-of-trend signal
+  - macd_runsum  : MACD histogram accumulated within the current sign-leg
+                   (resets when the histogram flips sign), divided by that day's
+                   close — a price-normalized momentum-of-trend signal
 
 A GaussianHMM (hmmlearn) is fit on the standardized features. Its latent states
 are then *ordered by mean VIX* and mapped onto five named regimes:
@@ -79,8 +80,7 @@ def _macd_hist(close: pd.Series, fast: int, slow: int, signal: int = 9) -> pd.Se
 
 
 def build_features(underlying: str = "SPY", rv_window: int = 20,
-                   macd_fast: int = 10, macd_slow: int = 30,
-                   macd_sum_window: int = 10) -> pd.DataFrame:
+                   macd_fast: int = 10, macd_slow: int = 30) -> pd.DataFrame:
     vix = _load_close("VIX")
     if vix is None:
         raise FileNotFoundError("VIX.parquet not found in data/raw/daily")
@@ -100,9 +100,15 @@ def build_features(underlying: str = "SPY", rv_window: int = 20,
         df["term_spread"] = (vix3m - vix).reindex(df.index)
     else:
         df["term_spread"] = np.nan
-    # MACD histogram running sum on the underlying
+    # MACD histogram accumulated within the current sign-leg: the running total
+    # resets to zero each time the histogram flips sign, so a big positive value
+    # means a long sustained up-leg and a big negative a deep down-leg. Divided
+    # by the day's close to normalize across price levels.
     hist = _macd_hist(px, macd_fast, macd_slow)
-    df["macd_runsum"] = hist.rolling(macd_sum_window).sum().reindex(df.index)
+    sgn = np.sign(hist)
+    leg = (sgn != sgn.shift()).cumsum()            # new id at each sign flip
+    leg_cum = hist.groupby(leg).cumsum()
+    df["macd_runsum"] = (leg_cum / px).reindex(df.index)
 
     df = df.dropna(subset=FEATURES)
     return df
@@ -123,8 +129,8 @@ def _empirical_transmat(states: np.ndarray, n: int = 5) -> np.ndarray:
 
 def fit_regimes(underlying: str = "SPY", rv_window: int = 20,
                 macd_fast: int = 10, macd_slow: int = 30,
-                macd_sum_window: int = 10, seed: int = 42) -> RegimeResult:
-    df = build_features(underlying, rv_window, macd_fast, macd_slow, macd_sum_window)
+                seed: int = 42) -> RegimeResult:
+    df = build_features(underlying, rv_window, macd_fast, macd_slow)
     X = df[FEATURES].to_numpy(dtype=float)
     mu, sd = X.mean(0), X.std(0)
     sd[sd == 0] = 1.0
@@ -182,7 +188,7 @@ def fit_regimes(underlying: str = "SPY", rv_window: int = 20,
         df=out, method=method, transmat=transmat, regime_means=regime_means,
         underlying=underlying,
         params=dict(rv_window=rv_window, macd_fast=macd_fast,
-                    macd_slow=macd_slow, macd_sum_window=macd_sum_window, seed=seed),
+                    macd_slow=macd_slow, seed=seed),
     )
 
 

@@ -1891,15 +1891,13 @@ with tab_regime:
     _rv = c2.number_input("Realized-vol window (days)", 5, 120, 20, 1)
     _mf = c3.number_input("MACD fast EMA", 3, 30, 10, 1)
     _ms = c4.number_input("MACD slow EMA", 10, 60, 30, 1)
-    _msum = st.slider("MACD histogram running-sum window (days)", 3, 40, 10)
 
     @st.cache_data(show_spinner="Fitting HMM volatility regimes...")
-    def _cached_regimes(under, rv, mf, ms, msum, version):
-        return _vr.fit_regimes(under, rv_window=rv, macd_fast=mf,
-                               macd_slow=ms, macd_sum_window=msum)
+    def _cached_regimes(under, rv, mf, ms, version):
+        return _vr.fit_regimes(under, rv_window=rv, macd_fast=mf, macd_slow=ms)
 
     try:
-        res = _cached_regimes(_under, int(_rv), int(_mf), int(_ms), int(_msum),
+        res = _cached_regimes(_under, int(_rv), int(_mf), int(_ms),
                               _data_version())
     except Exception as e:
         st.error(f"Could not fit regimes: {e}")
@@ -1925,7 +1923,7 @@ with tab_regime:
     m1.metric("VIX", f"{last['vix']:.1f}")
     m2.metric(f"Realized vol {int(_rv)}d", f"{last['rv']:.1f}%")
     m3.metric("VIX3M − VIX", f"{last['term_spread']:+.2f}")
-    m4.metric("MACD run-sum", f"{last['macd_runsum']:+.2f}")
+    m4.metric("MACD leg-sum ÷ price", f"{last['macd_runsum']:+.4f}")
 
     # Regime probabilities today
     probs = res.current_probs

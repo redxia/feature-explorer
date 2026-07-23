@@ -165,3 +165,48 @@ def fit_regimes(underlying: str = "SPY", rv_window: int = 20,
         params=dict(rv_window=rv_window, macd_fast=macd_fast,
                     macd_slow=macd_slow, macd_sum_window=macd_sum_window, seed=seed),
     )
+
+
+# Forecast horizons in trading days (1w .. 1y)
+FORECAST_HORIZONS = {
+    "1w": 5, "2w": 10, "3w": 15, "1m": 21, "2m": 42,
+    "3m": 63, "6m": 126, "9m": 189, "1y": 252,
+}
+
+
+def forecast(res: "RegimeResult") -> pd.DataFrame | None:
+    """Markov forecast of the regime distribution at each horizon.
+
+    Starts from today's posterior state distribution and propagates it through
+    the HMM transition matrix: p(h) = pi0 @ P**h. Adds the most-likely regime
+    and the probability-weighted expected VIX per horizon.
+
+    Returns None when no transition matrix is available (GaussianMixture fallback),
+    since a Markov forecast needs transition dynamics.
+
+    NOTE: as the horizon grows, P**h converges to the chain's stationary
+    distribution, so long-horizon forecasts (6m+) approach the unconditional
+    base-rate frequencies rather than a conditioned call.
+    """
+    if res.transmat is None:
+        return None
+    P = np.asarray(res.transmat, dtype=float)
+    P = P / P.sum(axis=1, keepdims=True)            # guard: rows sum to 1
+    pi0 = np.array([res.current_probs[n] for n in REGIME_NAMES], dtype=float)
+    if not np.isfinite(pi0).all() or pi0.sum() == 0:
+        pi0 = np.zeros(5); pi0[res.df["regime_idx"].iloc[-1]] = 1.0
+    pi0 = pi0 / pi0.sum()
+
+    vix_by_regime = res.regime_means["vix"].reindex(REGIME_NAMES).to_numpy(dtype=float)
+    rows = {}
+    exp_vix = {}
+    for label, h in FORECAST_HORIZONS.items():
+        dist = pi0 @ np.linalg.matrix_power(P, h)
+        rows[label] = dist
+        exp_vix[label] = float(np.nansum(dist * vix_by_regime))
+
+    fdf = pd.DataFrame(rows, index=REGIME_NAMES).T           # horizons x regimes
+    fdf["most_likely"] = fdf[REGIME_NAMES].idxmax(axis=1)
+    fdf["p(most_likely)"] = fdf[REGIME_NAMES].max(axis=1)
+    fdf["exp_VIX"] = pd.Series(exp_vix)
+    return fdf

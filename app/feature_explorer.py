@@ -87,7 +87,7 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
 horizons_pick = st.sidebar.multiselect(
     "Horizons to plot",
     options=horizon_labels(),
-    default=["1w", "2w", "3w", "1m", "2m", "3m"],
+    default=["1w", "2w", "3w", "1m", "2m", "3m", "6m"],
 )
 
 # ---- Data refresh ----
@@ -1943,6 +1943,37 @@ with tab_regime:
             st.plotly_chart(figm, use_container_width=True)
         else:
             st.info("Transition matrix requires the HMM (hmmlearn).")
+
+    # ---------- Regime forecast (Markov propagation pi*P^n) ----------
+    st.markdown("---")
+    st.markdown("##### 🔮 Forecast — probability of each regime N ahead")
+    fc = _vr.forecast(res)
+    if fc is None:
+        st.info("Regime forecasting needs the HMM transition matrix, which the "
+                "GaussianMixture fallback doesn't provide. Pin the app to Python "
+                "3.12 so hmmlearn installs, and the forecast will appear here.")
+    else:
+        _order = list(_vr.FORECAST_HORIZONS.keys())
+        _heat = fc.loc[_order, _vr.REGIME_NAMES]
+        figf = go.Figure(go.Heatmap(
+            z=_heat.values, x=_vr.REGIME_NAMES, y=_order,
+            colorscale="Blues", zmin=0, zmax=1,
+            text=np.round(_heat.values, 2), texttemplate="%{text}",
+            hovertemplate="horizon %{y}<br>%{x}: %{z:.1%}<extra></extra>"))
+        figf.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10),
+                           yaxis_title="horizon ahead", xaxis_title="regime",
+                           yaxis=dict(autorange="reversed"))
+        st.plotly_chart(figf, use_container_width=True)
+
+        _summ = fc.loc[_order, ["most_likely", "p(most_likely)", "exp_VIX"]].copy()
+        _summ["p(most_likely)"] = (_summ["p(most_likely)"] * 100).round(0).astype(int).astype(str) + "%"
+        _summ["exp_VIX"] = _summ["exp_VIX"].round(1)
+        _summ.columns = ["Most likely regime", "Probability", "Expected VIX"]
+        st.dataframe(_summ, use_container_width=True)
+        st.caption(
+            "Propagates today's state through the HMM transition matrix "
+            "(pi*P^n, n in trading days). Horizons of 6m+ converge toward the "
+            "chain's long-run base rates — read them as climatology, not a call.")
 
     st.caption(
         f"Method: {res.method} · underlying {res.underlying} · "

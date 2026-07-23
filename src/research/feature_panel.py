@@ -105,7 +105,7 @@ def _load_vix() -> pd.DataFrame | None:
         return None
     v = pd.read_parquet(p)[["timestamp", "close"]].rename(columns={"close": "vix"})
     v["timestamp"] = pd.to_datetime(v["timestamp"], utc=True)
-    v["date"] = v["timestamp"].dt.tz_convert("America/New_York").dt.date
+    v["date"] = v["timestamp"].dt.tz_convert("UTC").dt.date
     v = v.sort_values("date").reset_index(drop=True)
     v["vix_change_5d"] = v["vix"].diff(5)
     v["vix_pct_rank_252"] = v["vix"].rolling(252).rank(pct=True)
@@ -116,7 +116,7 @@ def _load_vix() -> pd.DataFrame | None:
     if p3.exists():
         v3 = pd.read_parquet(p3)[["timestamp", "close"]].rename(columns={"close": "vix3m"})
         v3["date"] = pd.to_datetime(v3["timestamp"], utc=True).dt.tz_convert(
-            "America/New_York").dt.date
+            "UTC").dt.date
         v3 = v3[["date", "vix3m"]]
         out = out.merge(v3, on="date", how="left")
         out["vix3m_over_vix"] = out["vix3m"] / out["vix"]
@@ -131,7 +131,7 @@ def _load_vix() -> pd.DataFrame | None:
     if p_vvix.exists():
         vv = pd.read_parquet(p_vvix)[["timestamp", "close"]].rename(columns={"close": "vvix"})
         vv["date"] = pd.to_datetime(vv["timestamp"], utc=True).dt.tz_convert(
-            "America/New_York").dt.date
+            "UTC").dt.date
         out = out.merge(vv[["date", "vvix"]], on="date", how="left")
     else:
         out["vvix"] = np.nan
@@ -144,7 +144,7 @@ def _load_vix() -> pd.DataFrame | None:
         lqd = pd.read_parquet(p_lqd)[["timestamp", "close"]].rename(columns={"close": "lqd"})
         for d in (hyg, lqd):
             d["date"] = pd.to_datetime(d["timestamp"], utc=True).dt.tz_convert(
-                "America/New_York").dt.date
+                "UTC").dt.date
         out = out.merge(hyg[["date", "hyg"]], on="date", how="left")
         out = out.merge(lqd[["date", "lqd"]], on="date", how="left")
         out["hyg_lqd_log"] = np.log(out["hyg"]) - np.log(out["lqd"])
@@ -159,7 +159,7 @@ def _load_vix() -> pd.DataFrame | None:
         irx = pd.read_parquet(p_irx)[["timestamp", "close"]].rename(columns={"close": "irx"})
         for d in (tnx, irx):
             d["date"] = pd.to_datetime(d["timestamp"], utc=True).dt.tz_convert(
-                "America/New_York").dt.date
+                "UTC").dt.date
         out = out.merge(tnx[["date", "tnx"]], on="date", how="left")
         out = out.merge(irx[["date", "irx"]], on="date", how="left")
         out["term_spread_10y_3m"] = out["tnx"] - out["irx"]
@@ -173,7 +173,7 @@ def _load_vix() -> pd.DataFrame | None:
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy().sort_values("timestamp").reset_index(drop=True)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    df["date"] = df["timestamp"].dt.tz_convert("America/New_York").dt.date
+    df["date"] = df["timestamp"].dt.tz_convert("UTC").dt.date
 
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
 
@@ -228,7 +228,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     in_dd = ((c / expanding_max - 1.0) <= -0.05).astype(int)
     df["days_since_5pct_dd"] = (1 - in_dd).groupby(in_dd.cumsum()).cumcount()
 
-    ts_et = pd.to_datetime(df["timestamp"]).dt.tz_convert("America/New_York")
+    ts_et = pd.to_datetime(df["timestamp"]).dt.tz_convert("UTC")
     df["month_of_year"] = ts_et.dt.month
     df["dow"] = ts_et.dt.dayofweek
 

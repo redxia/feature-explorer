@@ -108,6 +108,19 @@ def build_features(underlying: str = "SPY", rv_window: int = 20,
     return df
 
 
+def _empirical_transmat(states: np.ndarray, n: int = 5) -> np.ndarray:
+    """Maximum-likelihood Markov transition matrix from an observed state path:
+    P[i,j] = count(i->j) / count(i). Lets the GaussianMixture fallback (no
+    hmmlearn) still provide a transition matrix so forecasts work."""
+    T = np.zeros((n, n), dtype=float)
+    s = np.asarray(states, dtype=int)
+    for a, b in zip(s[:-1], s[1:]):
+        T[a, b] += 1.0
+    rs = T.sum(axis=1, keepdims=True)
+    rs[rs == 0] = 1.0
+    return T / rs
+
+
 def fit_regimes(underlying: str = "SPY", rv_window: int = 20,
                 macd_fast: int = 10, macd_slow: int = 30,
                 macd_sum_window: int = 10, seed: int = 42) -> RegimeResult:
@@ -155,6 +168,12 @@ def fit_regimes(underlying: str = "SPY", rv_window: int = 20,
 
     if transmat_raw is not None:
         transmat = transmat_raw[np.ix_(order, order)]
+    else:
+        # GaussianMixture fallback: estimate the Markov transition matrix from
+        # the ordered regime-state path so the forecast + transition matrix work
+        # without hmmlearn.
+        transmat = _empirical_transmat(ranks, 5)
+        method += " + empirical transitions"
 
     regime_means = (out.groupby("regime")[FEATURES].mean()
                     .reindex(REGIME_NAMES))

@@ -1916,8 +1916,10 @@ with tab_regime:
         f"({reg_df.index.max().date()}): {cur}</div>",
         unsafe_allow_html=True)
     if res.method != "HMM":
-        st.warning(f"hmmlearn unavailable — used {res.method}. Regimes are still "
-                   "ordered by VIX but lack HMM transition dynamics.")
+        st.caption(f"Model: {res.method}. hmmlearn isn't available on this Python "
+                   "build, so regimes come from a Gaussian mixture and the "
+                   "transition matrix is estimated empirically from the state path "
+                   "— the forecast below is fully functional either way.")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("VIX", f"{last['vix']:.1f}")

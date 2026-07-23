@@ -273,10 +273,11 @@ if st.sidebar.button("♻️ Refresh + retrain permanently (GitHub)",
 
 # ---------- tabs ----------
 
-tab_lgbm, tab_dash, tab_scatter, tab_scenario, tab_corr, tab_buckets = st.tabs([
+(tab_lgbm, tab_dash, tab_scatter, tab_scenario, tab_corr, tab_buckets,
+ tab_regime) = st.tabs([
     "🤖 LightGBM Signal Dashboard", "Signal Dashboard (empirical)",
     "Scatter vs fwd returns", "What-if scenario",
-    "Correlation matrix", "Quantile buckets"
+    "Correlation matrix", "Quantile buckets", "🌡️ Vol Regimes (HMM)"
 ])
 
 
@@ -1828,3 +1829,122 @@ with tab_buckets:
                  use_container_width=True)
     st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="worst_pct").round(1),
                  use_container_width=True)
+
+
+# ===== Tab 6: Volatility Regimes (Hidden Markov Model) =====
+with tab_regime:
+    from src.research import vol_regime as _vr
+
+    st.subheader("🌡️ Volatility regimes — 5-state Hidden Markov Model")
+    st.caption(
+        "A Gaussian HMM segments history into five persistent volatility states "
+        "from four daily features: **VIX** level, **realized (historical) "
+        "volatility**, the **VIX3M − VIX** term spread, and a **running sum of "
+        "the MACD histogram**. Latent states are ordered by mean VIX and labelled "
+        "Extremely Low → Extremely High.")
+
+    with st.expander("ℹ️ How to read this"):
+        st.markdown("""
+- **Persistent by design:** an HMM models the probability of *staying in* vs
+  *switching* regimes, so labels don't flip on daily noise (see the transition matrix).
+- **Term spread** (VIX3M − VIX): positive = calm contango; negative = stressed
+  backwardation, typical of the Extremely-High regime.
+- **MACD run-sum** on the underlying captures trend momentum accompanying the vol state.
+- Regimes are ordered by average VIX, so *Extremely Low* is the calmest tape and
+  *Extremely High* is crisis-like.
+""")
+
+    c1, c2, c3, c4 = st.columns(4)
+    _under = c1.selectbox("Underlying (for realized vol + MACD)",
+                          options=([s for s in ["SPY", "QQQ", "IWM", "DIA"] if s in syms]
+                                   + [s for s in syms if s not in ("SPY", "QQQ", "IWM", "DIA")]),
+                          index=0)
+    _rv = c2.number_input("Realized-vol window (days)", 5, 120, 20, 1)
+    _mf = c3.number_input("MACD fast EMA", 3, 30, 10, 1)
+    _ms = c4.number_input("MACD slow EMA", 10, 60, 30, 1)
+    _msum = st.slider("MACD histogram running-sum window (days)", 3, 40, 10)
+
+    @st.cache_data(show_spinner="Fitting HMM volatility regimes...")
+    def _cached_regimes(under, rv, mf, ms, msum):
+        return _vr.fit_regimes(under, rv_window=rv, macd_fast=mf,
+                               macd_slow=ms, macd_sum_window=msum)
+
+    try:
+        res = _cached_regimes(_under, int(_rv), int(_mf), int(_ms), int(_msum))
+    except Exception as e:
+        st.error(f"Could not fit regimes: {e}")
+        st.stop()
+
+    reg_df = res.df
+    cur = res.current
+    cur_color = _vr.REGIME_COLORS[cur]
+    last = reg_df.iloc[-1]
+
+    st.markdown(
+        f"<div style='padding:14px 18px;border-radius:10px;background:{cur_color};"
+        f"color:#111;font-weight:600;font-size:1.15rem'>Current regime "
+        f"({reg_df.index.max().date()}): {cur}</div>",
+        unsafe_allow_html=True)
+    if res.method != "HMM":
+        st.warning(f"hmmlearn unavailable — used {res.method}. Regimes are still "
+                   "ordered by VIX but lack HMM transition dynamics.")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("VIX", f"{last['vix']:.1f}")
+    m2.metric(f"Realized vol {int(_rv)}d", f"{last['rv']:.1f}%")
+    m3.metric("VIX3M − VIX", f"{last['term_spread']:+.2f}")
+    m4.metric("MACD run-sum", f"{last['macd_runsum']:+.2f}")
+
+    # Regime probabilities today
+    probs = res.current_probs
+    prob_df = pd.DataFrame({"regime": list(probs.keys()),
+                            "probability": list(probs.values())})
+    figp = px.bar(prob_df, x="regime", y="probability",
+                  color="regime", color_discrete_map=_vr.REGIME_COLORS,
+                  category_orders={"regime": _vr.REGIME_NAMES})
+    figp.update_layout(showlegend=False, height=240,
+                       margin=dict(l=10, r=10, t=30, b=10),
+                       title="Today's state probabilities")
+    st.plotly_chart(figp, use_container_width=True)
+
+    # VIX timeline coloured by regime
+    st.markdown("##### VIX history coloured by regime")
+    plot_df = reg_df.reset_index().rename(columns={"index": "date"})
+    if "date" not in plot_df.columns:
+        plot_df = plot_df.rename(columns={plot_df.columns[0]: "date"})
+    figt = px.scatter(plot_df, x="date", y="vix", color="regime",
+                      color_discrete_map=_vr.REGIME_COLORS,
+                      category_orders={"regime": _vr.REGIME_NAMES},
+                      render_mode="webgl")
+    figt.update_traces(marker=dict(size=3))
+    figt.update_layout(height=380, legend_title="", margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(figt, use_container_width=True)
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("##### Per-regime feature averages")
+        st.dataframe(res.regime_means.round(2), use_container_width=True)
+        st.markdown("##### Days spent in each regime")
+        vc = reg_df["regime"].value_counts().reindex(_vr.REGIME_NAMES).fillna(0).astype(int)
+        share = (vc / vc.sum() * 100).round(1)
+        st.dataframe(pd.DataFrame({"days": vc, "% of history": share}),
+                     use_container_width=True)
+    with colB:
+        st.markdown("##### Transition matrix  P(next | current)")
+        if res.transmat is not None:
+            tm = pd.DataFrame(res.transmat, index=_vr.REGIME_NAMES,
+                              columns=_vr.REGIME_NAMES)
+            figm = go.Figure(go.Heatmap(
+                z=tm.values, x=_vr.REGIME_NAMES, y=_vr.REGIME_NAMES,
+                colorscale="Blues", zmin=0, zmax=1,
+                text=np.round(tm.values, 2), texttemplate="%{text}"))
+            figm.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10),
+                               yaxis_title="current", xaxis_title="next")
+            st.plotly_chart(figm, use_container_width=True)
+        else:
+            st.info("Transition matrix requires the HMM (hmmlearn).")
+
+    st.caption(
+        f"Method: {res.method} · underlying {res.underlying} · "
+        f"{len(reg_df):,} days ({reg_df.index.min().date()} to "
+        f"{reg_df.index.max().date()}) · features standardized before fitting.")

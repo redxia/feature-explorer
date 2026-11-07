@@ -1,7 +1,7 @@
 """Daily feature panel + forward returns, for the feature_explorer UI.
 
 Loads daily bars from data/raw/daily/{SYMBOL}.parquet, computes a wide set of
-daily technical features, and joins forward log-returns at common research
+daily technical features, and joins forward simple returns at common research
 horizons (5/10/15/21/42/63/84/105/126/189/252 trading days =
 1w/2w/3w/1m/2m/3m/4m/5m/6m/9m/12m).
 
@@ -19,6 +19,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 DAILY_DIR = Path(__file__).resolve().parents[2] / "data" / "raw" / "daily"
+RETURN_SCHEMA_VERSION = "simple_v1"
 
 # Forward-return horizons in trading days
 FWD_HORIZONS = {
@@ -46,11 +47,11 @@ FEATURES = [
     "dist_sma50_pct",
     "dist_sma200_pct",
     "sma50_sma200_ratio",
-    "log_ret_1",
-    "log_ret_5",
-    "log_ret_20",
-    "log_ret_60",
-    "log_ret_252",
+    "ret_1",
+    "ret_5",
+    "ret_20",
+    "ret_60",
+    "ret_252",
     "realized_vol_20",
     "realized_vol_60",
     "vol_ratio_20",
@@ -193,13 +194,13 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df["dist_sma200_pct"] = (c - sma200) / sma200
     df["sma50_sma200_ratio"] = sma50 / sma200 - 1.0
 
-    log_ret = np.log(c / c.shift(1))
-    df["log_ret_1"] = log_ret
+    ret_1 = c / c.shift(1) - 1
+    df["ret_1"] = ret_1
     for k in (5, 20, 60, 252):
-        df[f"log_ret_{k}"] = np.log(c / c.shift(k))
+        df[f"ret_{k}"] = c / c.shift(k) - 1
 
-    df["realized_vol_20"] = log_ret.rolling(20).std() * np.sqrt(252)
-    df["realized_vol_60"] = log_ret.rolling(60).std() * np.sqrt(252)
+    df["realized_vol_20"] = ret_1.rolling(20).std() * np.sqrt(252)
+    df["realized_vol_60"] = ret_1.rolling(60).std() * np.sqrt(252)
 
     vol_ma20 = v.rolling(20).mean()
     df["vol_ratio_20"] = v / vol_ma20
@@ -255,7 +256,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Forward returns
     for label, h in FWD_HORIZONS.items():
-        df[f"fwd_{label}"] = np.log(c.shift(-h) / c)
+        df[f"fwd_{label}"] = c.shift(-h) / c - 1
     return df
 
 

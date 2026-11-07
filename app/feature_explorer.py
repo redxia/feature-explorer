@@ -32,11 +32,13 @@ sys.path.insert(0, str(REPO_ROOT))
 # Streamlit can rerun this script while retaining the feature module from an
 # earlier deployment. Reload it if the new month horizons are missing.
 from src.research import feature_panel as _feature_panel  # noqa: E402
-if not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS):
+if (not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS)
+        or getattr(_feature_panel, "RETURN_SCHEMA_VERSION", None) != "simple_v1"):
     importlib.reload(_feature_panel)
 
 from src.research.feature_panel import (  # noqa: E402
-    load_panel, available_symbols, feature_columns, horizon_labels, FWD_HORIZONS,
+    load_panel, available_symbols, feature_columns, horizon_labels,
+    FWD_HORIZONS, RETURN_SCHEMA_VERSION,
 )
 
 st.set_page_config(page_title="Feature Explorer", layout="wide")
@@ -62,7 +64,8 @@ def cached_panel(symbols: tuple[str, ...], version: float) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Loading symbol...")
-def cached_per_symbol(sym: str, version: float, horizons_version: tuple) -> pd.DataFrame:
+def cached_per_symbol(sym: str, version: float, horizons_version: tuple,
+                      return_schema: str) -> pd.DataFrame:
     """Per-symbol cache, keyed on data version so a refresh always reloads."""
     return load_panel([sym])
 
@@ -88,7 +91,8 @@ if not selected_syms:
 # Per-symbol cache; concat is fast vs reloading whole panel.
 # _data_version() in the key forces a reload whenever the parquet files change.
 _ver = _data_version()
-panel = pd.concat([cached_per_symbol(s, _ver, tuple(FWD_HORIZONS.items()))
+panel = pd.concat([cached_per_symbol(s, _ver, tuple(FWD_HORIZONS.items()),
+                                     RETURN_SCHEMA_VERSION)
                    for s in selected_syms],
                   ignore_index=True)
 latest_panel = panel
@@ -328,7 +332,7 @@ with tab_dash:
 
     with st.expander("📖 Feature glossary — what does each feature mean?"):
         st.markdown("""
-*All features computed from daily OHLCV. "fwd return" = log return over the next N trading days.*
+*All features computed from daily OHLCV. "fwd return" = (future close / current close) - 1 over N trading days.*
 
 | feature | what it measures | typical range | sign convention |
 |---|---|---|---|
@@ -340,12 +344,12 @@ with tab_dash:
 | **`dist_sma50_pct`** | Distance from 50-day SMA | -0.30 to +0.30 | negative = below 50dma (medium-term weakness) |
 | **`dist_sma200_pct`** | Distance from 200-day SMA. Bull/bear regime line | -0.50 to +0.50 | negative = bear market territory |
 | **`sma50_sma200_ratio`** | (SMA50 / SMA200) − 1. Golden/death cross indicator | -0.20 to +0.20 | positive = uptrend (golden cross), negative = downtrend |
-| **`log_ret_1`** | Yesterday's log return. 1-day momentum | -0.05 to +0.05 | mean-reverts strongly intraday, weak signal |
-| **`log_ret_5`** | 5-day log return. Weekly momentum | -0.10 to +0.10 | usually mean-reverts |
-| **`log_ret_20`** | 20-day log return. Monthly momentum | -0.20 to +0.20 | mean-reverts at 1-3m horizon |
-| **`log_ret_60`** | 60-day log return. Quarterly momentum | -0.40 to +0.40 | inversely predicts next 1-3m |
-| **`log_ret_252`** | 1-year log return | -0.60 to +0.60 | strong long-term reversal: bad year predicts good year (and vice versa) |
-| **`realized_vol_20`** | Stdev of daily log returns × √252, 20-day window. Annualized vol | 0.05-0.80 | high vol = positive fwd return signal historically |
+| **`ret_1`** | Yesterday's realized return. 1-day momentum | -0.05 to +0.05 | mean-reverts strongly intraday, weak signal |
+| **`ret_5`** | 5-day realized return. Weekly momentum | -0.10 to +0.10 | usually mean-reverts |
+| **`ret_20`** | 20-day realized return. Monthly momentum | -0.20 to +0.20 | mean-reverts at 1-3m horizon |
+| **`ret_60`** | 60-day realized return. Quarterly momentum | -0.40 to +0.40 | inversely predicts next 1-3m |
+| **`ret_252`** | 1-year realized return | -0.60 to +0.60 | strong long-term reversal: bad year predicts good year (and vice versa) |
+| **`realized_vol_20`** | Stdev of daily realized returns × √252, 20-day window. Annualized vol | 0.05-0.80 | high vol = positive fwd return signal historically |
 | **`realized_vol_60`** | Same, 60-day window. Smoother | 0.05-0.80 | same |
 | **`vol_ratio_20`** | Today's volume / 20-day avg volume | 0.3-5.0 | spikes during news, mostly noise as signal |
 | **`obv_60d_chg`** | OBV (On-Balance Volume) 60-day change ÷ 60d avg volume. Cumulative signed-volume momentum | -10 to +10 | NEGATIVE ρ vs fwd returns: heavy crowd-buying (high OBV) precedes drawdowns (mean reversion); heavy distribution precedes rallies |
@@ -466,14 +470,14 @@ news, regime change, or tail events.
     composite_df = pd.DataFrame([
         {
             "horizon": h,
-            "expected_log_return": composite[h]["wfwd"] / composite[h]["wsum"]
+            "expected_return": composite[h]["wfwd"] / composite[h]["wsum"]
                 if composite[h]["wsum"] > 0 else np.nan,
             "win_rate": composite[h]["wgreen"] / composite[h]["wsum"]
                 if composite[h]["wsum"] > 0 else np.nan,
         }
         for h in horizons
     ])
-    composite_df["expected_pct"] = (np.exp(composite_df["expected_log_return"]) - 1) * 100
+    composite_df["expected_pct"] = composite_df["expected_return"] * 100
     composite_df["win_rate_pct"] = composite_df["win_rate"] * 100
 
     # ---- panel TOP: trade rec (was Panel C — moved up) ----
@@ -561,7 +565,7 @@ exactly where the edge sits.*
     for fs in feat_stats:
         ph_1m = fs["per_horizon"]["1m"]
         if np.isnan(ph_1m["sp"]) or np.isnan(ph_1m["mean_fwd"]): continue
-        contrib_pct = (np.exp(ph_1m["mean_fwd"]) - 1) * 100 * abs(ph_1m["sp"])
+        contrib_pct = ph_1m["mean_fwd"] * 100 * abs(ph_1m["sp"])
         drivers.append((fs, contrib_pct))
     drivers.sort(key=lambda x: abs(x[1]), reverse=True)
 
@@ -574,7 +578,7 @@ exactly where the edge sits.*
         }
         for h in rec_horiz:
             ph = fs["per_horizon"][h]
-            row[f"{h}_exp%"] = (round((np.exp(ph["mean_fwd"])-1)*100, 2)
+            row[f"{h}_exp%"] = (round(ph["mean_fwd"] * 100, 2)
                                 if not np.isnan(ph["mean_fwd"]) else None)
             row[f"{h}_win%"] = (round(ph["pct_green"]*100, 0)
                                 if not np.isnan(ph["pct_green"]) else None)
@@ -625,7 +629,7 @@ exactly where the edge sits.*
                    if not np.isnan(fs["per_horizon"][h]["sp"])]
         edge_score = float(np.mean(np.abs(all_sps))) if all_sps else 0.0
 
-        def _exp(v): return round((np.exp(v)-1)*100, 2) if not np.isnan(v) else None
+        def _return_pct(v): return round(v*100, 2) if not np.isnan(v) else None
         def _pct_round(v): return round(v*100, 0) if not np.isnan(v) else None
 
         row = {
@@ -638,7 +642,7 @@ exactly where the edge sits.*
         # All requested horizons: 1w, 2w, 3w, 1m, 2m, 3m, 6m
         for h in ["1w", "2w", "3w", "1m", "2m", "3m", "6m"]:
             ph = fs["per_horizon"][h]
-            row[f"{h}_exp%"] = _exp(ph["mean_fwd"])
+            row[f"{h}_exp%"] = _return_pct(ph["mean_fwd"])
             row[f"{h}_win%"] = _pct_round(ph["pct_green"])
         posture_rows.append(row)
     # Sort by feature edge strength (top = most informative for this symbol)
@@ -683,7 +687,7 @@ count more (|ρ| weighting).*
     ))
     fig.update_layout(
         height=400,
-        yaxis_title="Expected log-return (%)",
+        yaxis_title="Expected return (%)",
         xaxis_title="Horizon",
         title=f"{target}: composite expected return (current state)",
         showlegend=False,
@@ -703,8 +707,8 @@ count more (|ρ| weighting).*
   deviations to get enough samples.
 - **Composite weighted by |ρ|:** features with stronger historical edge get
   more vote. Noise features (low |ρ|) get near-zero weight.
-- **Log return vs %:** internally we use log returns (additive across time).
-  Display converts to % via exp(log_ret) − 1.
+- **Realized return:** each forward return is (future close / current close) − 1.
+  Charts and forecasts display that return as a percentage.
 
 **Limitations:**
 - Past ≠ future. Regime shifts (rate cycles, secular bull/bear) not modeled.
@@ -718,6 +722,8 @@ count more (|ρ| weighting).*
 # ===== Tab: 🤖 LightGBM Signal Dashboard =====
 with tab_lgbm:
     from src.research import lgbm_dash_model as lgbm_mod
+    if getattr(lgbm_mod, "MODEL_RETURN_SCHEMA_VERSION", None) != RETURN_SCHEMA_VERSION:
+        importlib.reload(lgbm_mod)
 
     st.subheader("🤖 LightGBM Signal Dashboard")
     st.caption("Replaces ±0.5σ kernel with LightGBM regressor (fwd return) "
@@ -735,7 +741,7 @@ with tab_lgbm:
 
 **LightGBM (this) dashboard:**
 - Two models per (symbol, horizon):
-  - **Regressor** → predicts fwd log-return (Huber loss, robust to fat tails)
+  - **Regressor** → predicts forward realized return (Huber loss, robust to fat tails)
   - **Classifier** → predicts P(fwd > 0)
 - Inputs = all features simultaneously (vol stack, RSI, MA distances, VIX, credit, rates).
 - **Tree-based gradient boosting:** captures interactions and non-linearity natively.
@@ -1087,7 +1093,7 @@ e.g. base $10k × 30% conviction → $3k position
         marker_color=["#26A69A" if v >= 0 else "#EF5350" for v in pred_df["exp_pct"]],
     ))
     fig.add_hline(y=0, line_color="gray", line_width=1)
-    fig.update_layout(height=420, yaxis_title="Expected log-return (%)",
+    fig.update_layout(height=420, yaxis_title="Expected return (%)",
                       xaxis_title="Horizon", showlegend=False,
                       title=f"{target_l}: LightGBM forecast")
     st.plotly_chart(fig, use_container_width=True)
@@ -1117,7 +1123,7 @@ e.g. base $10k × 30% conviction → $3k position
                       "CLF_AUC", "CLF_Brier",
                       "CLF_IC", "CLF_hit_%",
                       "CLF_LogLoss", "CLF_pseudoR²"]
-    st.caption("**REG_*** = regressor metrics (predicting fwd log-return). "
+    st.caption("**REG_*** = regressor metrics (predicting forward realized return). "
                "**CLF_*** = classifier metrics (predicting P(fwd>0)). "
                "Columns side-by-side so you can see direction edge from both models.")
     st.dataframe(
@@ -1187,7 +1193,7 @@ e.g. base $10k × 30% conviction → $3k position
 
 # ===== Tab 1: Scatter =====
 with tab_scatter:
-    st.subheader("Feature vs forward log-return")
+    st.subheader("Feature vs forward realized return")
 
     mode = st.radio("Mode", ["Top 15 features (small multiples)", "Single feature (detailed)"],
                     horizontal=True, index=0)
@@ -1216,6 +1222,7 @@ with tab_scatter:
                 col = f"fwd_{h}"
                 sub = panel.dropna(subset=[f, col])[[f, col]].copy()
                 sub.columns = ["x", "fwd"]
+                sub["fwd"] *= 100
                 sub["feature"] = f
                 sub["horizon"] = h
                 long_blocks.append(sub)
@@ -1232,7 +1239,7 @@ with tab_scatter:
                     "feature": top10,
                 },
                 opacity=0.35, trendline="ols", trendline_scope="trace",
-                labels={"x": "feature value", "fwd": "fwd log-return"},
+                labels={"x": "feature value", "fwd": "forward realized return (%)"},
                 height=2000,
             )
             fig.update_xaxes(matches=None, showticklabels=True)
@@ -1408,7 +1415,7 @@ with tab_scatter:
                         cond_y = sub.loc[win_mask, col]
                         n_cond = int(len(cond_y))
                         if n_cond:
-                            cond_mean_pct = float((np.exp(cond_y.mean()) - 1) * 100)
+                            cond_mean_pct = float(cond_y.mean() * 100)
                             cond_win = float((cond_y > 0).mean()) * 100
 
                     stat_rows.append({
@@ -1458,7 +1465,6 @@ if not mode.startswith("Top 15"):
     with col1:
         feat = st.selectbox("Feature", options=feature_columns(),
                             index=feature_columns().index("atr_pct_14"))
-        log_y = st.checkbox("Symlog y axis", value=False)
         sample_n = st.number_input("Subsample (0 = all)", value=0, min_value=0, step=500)
 
     df = panel.dropna(subset=[feat])
@@ -1474,6 +1480,7 @@ if not mode.startswith("Top 15"):
     long_df = pd.concat(long, ignore_index=True)
     if sample_n > 0 and len(long_df) > sample_n:
         long_df = long_df.sample(sample_n, random_state=0)
+    long_df["fwd"] *= 100
 
     fig = px.scatter(
         long_df, x=feat, y="fwd", color="horizon",
@@ -1482,11 +1489,9 @@ if not mode.startswith("Top 15"):
         trendline="ols",
         trendline_scope="trace",
         hover_data=["symbol", "date"],
-        labels={"fwd": "forward log-return"},
+        labels={"fwd": "forward realized return (%)"},
         height=600,
     )
-    if log_y:
-        fig.update_yaxes(type="log")
     # Use the latest feature value, even when the date filter excludes today or
     # recent rows have no realized forward return yet.
     cur_sym = selected_syms[0]
@@ -1520,7 +1525,7 @@ if not mode.startswith("Top 15"):
         if len(sub) < 30:
             rows.append({"horizon": h_lbl, "n": len(sub), "pearson": np.nan,
                          "spearman": np.nan, "slope": np.nan, "intercept": np.nan,
-                         "mean_fwd": np.nan})
+                         "mean_fwd_%": np.nan})
             continue
         pear = float(np.corrcoef(x, y)[0, 1])
         sp = float(spearmanr(x, y).statistic)
@@ -1531,7 +1536,7 @@ if not mode.startswith("Top 15"):
             "spearman": round(sp, 4),
             "slope": round(float(slope), 6),
             "intercept": round(float(intercept), 6),
-            "mean_fwd": round(float(y.mean()), 5),
+            "mean_fwd_%": round(float(y.mean() * 100), 2),
         })
     st.subheader("Per-horizon stats")
     stats_df = pd.DataFrame(rows).set_index("horizon")
@@ -1552,8 +1557,8 @@ if not mode.startswith("Top 15"):
             window = sub[(sub[feat] > cur_val - tol) & (sub[feat] < cur_val + tol)][col]
             cond_rows.append({
                 "horizon": h_lbl,
-                "ols_yhat": round(float(yhat), 5),
-                "empirical_mean (±0.5σ window)": round(float(window.mean()), 5) if len(window) else np.nan,
+                "ols_yhat_%": round(float(yhat * 100), 2),
+                "empirical_mean_% (±0.5σ window)": round(float(window.mean() * 100), 2) if len(window) else np.nan,
                 "n_window": len(window),
                 "empirical_p_pos": round(float((window > 0).mean()), 3) if len(window) else np.nan,
             })
@@ -1635,7 +1640,7 @@ with tab_scenario:
             rows.append({
                 "feature": f, "horizon": h,
                 "n_window": len(window),
-                "mean_fwd_%": round((np.exp(window.mean()) - 1) * 100, 2),
+                "mean_fwd_%": round(window.mean() * 100, 2),
                 "win_%": round((window > 0).mean() * 100, 0),
             })
     sc_df = pd.DataFrame(rows)
@@ -1692,6 +1697,7 @@ with tab_scenario:
             col = f"fwd_{h}"
             sub = panel.dropna(subset=[f, col])[[f, col]].copy()
             sub.columns = ["x", "fwd"]
+            sub["fwd"] *= 100
             sub["feature"] = f
             sub["horizon"] = h
             long_blocks.append(sub)
@@ -1707,7 +1713,7 @@ with tab_scenario:
                 "feature": top10_sc,
             },
             opacity=0.30, trendline="ols", trendline_scope="trace",
-            labels={"x": "feature value", "fwd": "fwd log-return"},
+            labels={"x": "feature value", "fwd": "forward realized return (%)"},
             height=2000,
         )
         figS.update_xaxes(matches=None, showticklabels=True)
@@ -1844,12 +1850,12 @@ with tab_buckets:
             if len(x) == 0: continue
             rows.append({
                 "horizon": h, "bucket": b,
-                "mean_fwd": float(x.mean()),
-                "median_fwd": float(x.median()),
+                "mean_fwd": float(x.mean() * 100),
+                "median_fwd": float(x.median() * 100),
                 "pct_green": float((x > 0).mean()),
                 "pct_red":   float((x < 0).mean()),
-                "best_pct":  float((np.exp(x.max())-1)*100),
-                "worst_pct": float((np.exp(x.min())-1)*100),
+                "best_pct":  float(x.max() * 100),
+                "worst_pct": float(x.min() * 100),
                 "n": int(len(x)),
             })
     long_df = pd.DataFrame(rows)
@@ -1862,13 +1868,13 @@ with tab_buckets:
             "bucket": [f"q{i+1}" for i in range(n_buckets)],
             "horizon": horizon_labels(),
         },
-        labels={"mean_fwd": "mean fwd log-return"},
+        labels={"mean_fwd": "mean forward realized return (%)"},
         height=500,
         hover_data=["n", "pct_green", "pct_red", "best_pct", "worst_pct"],
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("##### Mean forward log-return per (bucket, horizon)")
+    st.markdown("##### Mean forward realized return (%) per (bucket, horizon)")
     st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="mean_fwd"),
                  use_container_width=True)
 

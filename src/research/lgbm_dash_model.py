@@ -1,7 +1,7 @@
 """LightGBM Signal Dashboard — per-symbol fwd-return + P(positive) models.
 
 For each (symbol, horizon) we train two models on the daily feature panel:
-  - Regressor   → predicts fwd log-return
+  - Regressor   → predicts simple realized forward return
   - Classifier  → predicts P(fwd > 0)
 
 Walk-forward validation gives honest OOS metrics (IC, AUC, hit-rate). Final
@@ -27,8 +27,10 @@ from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score, r2_score, brier_score_loss, log_loss
 
 from src.research.feature_panel import (
-    load_panel, FEATURES, FWD_HORIZONS, available_symbols,
+    load_panel, FEATURES, FWD_HORIZONS, RETURN_SCHEMA_VERSION, available_symbols,
 )
+
+MODEL_RETURN_SCHEMA_VERSION = RETURN_SCHEMA_VERSION
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logger = logging.getLogger(__name__)
@@ -287,6 +289,7 @@ def train_symbol(
 
 def _bundle_to_dict(b: SymbolBundle) -> dict:
     return {
+        "return_type": RETURN_SCHEMA_VERSION,
         "symbol": b.symbol,
         "trained_at": b.trained_at,
         "features": list(b.features),
@@ -359,9 +362,9 @@ def load_bundle(symbol: str) -> SymbolBundle | None:
         return None
     with open(p, "rb") as f:
         obj = pickle.load(f)
-    if isinstance(obj, dict):
+    if isinstance(obj, dict) and obj.get("return_type") == RETURN_SCHEMA_VERSION:
         return _dict_to_bundle(obj)
-    # Legacy dataclass pickle (from old runs) — drop & retrain
+    # Older model targets/features used log returns; never score them as simple returns.
     return None
 
 
@@ -376,20 +379,20 @@ def list_trained() -> list[str]:
 
 
 def predict_current(bundle: SymbolBundle, current_row: pd.Series) -> pd.DataFrame:
-    """Return per-horizon (exp_log_return, exp_pct, p_positive)."""
+    """Return per-horizon (expected simple return, percent return, p_positive)."""
     rows = []
     feats = bundle.features
     X = pd.DataFrame([{f: float(current_row[f]) if not pd.isna(current_row.get(f))
                        else np.nan for f in feats}])
     for h, m in bundle.horizons.items():
         if not m.reg_models: continue
-        log_ret = float(_bag_predict_reg(m.reg_models, X)[0])
+        expected_return = float(_bag_predict_reg(m.reg_models, X)[0])
         p_pos = float(_bag_predict_proba(m.clf_models, X)[0]) if m.clf_models else float("nan")
         rows.append({
             "horizon": h,
             "bars": m.bars,
-            "exp_log_ret": log_ret,
-            "exp_pct": (np.exp(log_ret) - 1) * 100,
+            "expected_return": expected_return,
+            "exp_pct": expected_return * 100,
             "p_positive": p_pos,
             "ic_oos": m.ic_oos,
             "r2_oos": m.r2_oos,

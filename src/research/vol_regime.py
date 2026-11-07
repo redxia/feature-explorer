@@ -3,7 +3,7 @@
 Features (all daily, from data/raw/daily/*.parquet, sourced from yfinance):
   - vix          : current CBOE VIX level
   - rv{N}        : realized volatility of the underlying (annualized std of
-                   log returns over N trading days) — "historical standard deviation"
+                   simple returns over N trading days) — "historical standard deviation"
   - term_spread  : VIX3M - VIX  (3-month minus spot; <0 = backwardation/stress)
   - macd_runsum  : MACD histogram accumulated within the current sign-leg
                    (resets when the histogram flips sign), divided by that day's
@@ -92,8 +92,8 @@ def build_features(underlying: str = "SPY", rv_window: int = 20,
     df = pd.DataFrame(index=vix.index)
     df["vix"] = vix
     # realized (historical) volatility, annualized %
-    logret = np.log(px / px.shift(1))
-    rv = logret.rolling(rv_window).std() * np.sqrt(252) * 100.0
+    returns = px / px.shift(1) - 1
+    rv = returns.rolling(rv_window).std() * np.sqrt(252) * 100.0
     df["rv"] = rv.reindex(df.index)
     # term structure: 3M minus spot
     if vix3m is not None:

@@ -511,7 +511,7 @@ exactly where the edge sits.*
         rec_rows.append({
             "horizon": h,
             "exp_%": round(v, 2),
-            "win_rate_%": round(wr, 0) if not np.isnan(wr) else None,
+            "win_rate_%": round(wr, 2) if not np.isnan(wr) else None,
             "verdict": f"{emoji} {verdict}",
         })
     rec_df = pd.DataFrame(rec_rows)
@@ -530,10 +530,13 @@ exactly where the edge sits.*
             chip = "🔴 BEAR" if v < -1.0 else "🟥 lean bear"
         else:
             chip = "⚪ neutral"
-        wr_txt = f"{wr:.0f}% win" if not np.isnan(wr) else ""
+        wr_txt = f"{wr:.2f}% win" if not np.isnan(wr) else ""
         cols[i].metric(h, f"{v:+.2f}%", delta=f"{chip}  {wr_txt}")
 
-    st.dataframe(rec_df.set_index("horizon").T, use_container_width=True)
+    rec_display = rec_df.set_index("horizon").T
+    for row_name in ("exp_%", "win_rate_%"):
+        rec_display.loc[row_name] = rec_display.loc[row_name].map(lambda v: f"{v:.2f}" if pd.notna(v) else "")
+    st.dataframe(rec_display, use_container_width=True)
 
     # Aggregates
     short_avg = composite_df.set_index("horizon").loc[
@@ -548,7 +551,7 @@ exactly where the edge sits.*
               delta="bullish" if short_avg > 0.5 else ("bearish" if short_avg < -0.5 else "neutral"))
     c2.metric("Long-term avg (6m-12m)", f"{long_avg:.2f}%",
               delta="bullish" if long_avg > 0.5 else ("bearish" if long_avg < -0.5 else "neutral"))
-    c3.metric("Conviction", f"{conf*100:.0f}%")
+    c3.metric("Conviction", f"{conf*100:.2f}%")
 
     st.caption("**Decision thresholds:** "
                "exp>+1% = BULLISH | +0.3 to +1% = lean bullish | "
@@ -574,13 +577,13 @@ exactly where the edge sits.*
         row = {
             "feature": fs["feature"],
             "cur_val": round(fs["cur_val"], 4),
-            "hist_pct": f"{fs['pct']*100:.0f}%",
+            "hist_pct": f"{fs['pct']*100:.2f}%",
         }
         for h in rec_horiz:
             ph = fs["per_horizon"][h]
             row[f"{h}_exp%"] = (round(ph["mean_fwd"] * 100, 2)
                                 if not np.isnan(ph["mean_fwd"]) else None)
-            row[f"{h}_win%"] = (round(ph["pct_green"]*100, 0)
+            row[f"{h}_win%"] = (round(ph["pct_green"]*100, 2)
                                 if not np.isnan(ph["pct_green"]) else None)
         row["1m_ρ"] = round(fs["per_horizon"]["1m"]["sp"], 3)
         rows.append(row)
@@ -592,7 +595,7 @@ exactly where the edge sits.*
         subset=exp_cols, cmap="RdYlGn", vmin=-3, vmax=3
     ).background_gradient(
         subset=win_cols, cmap="Greens", vmin=40, vmax=70
-    )
+    ).format({c: "{:.2f}" for c in exp_cols + win_cols})
     st.dataframe(sty, use_container_width=True)
 
     st.divider()
@@ -630,13 +633,13 @@ exactly where the edge sits.*
         edge_score = float(np.mean(np.abs(all_sps))) if all_sps else 0.0
 
         def _return_pct(v): return round(v*100, 2) if not np.isnan(v) else None
-        def _pct_round(v): return round(v*100, 0) if not np.isnan(v) else None
+        def _pct_round(v): return round(v*100, 2) if not np.isnan(v) else None
 
         row = {
             "feature": f,
             "edge_rank_|ρ|": round(edge_score, 3),
             "cur_val": round(fs["cur_val"], 4),
-            "hist_pct": f"{fs['pct']*100:.0f}%",
+            "hist_pct": f"{fs['pct']*100:.2f}%",
             "edge_short_avg_ρ": round(avg_sp, 3),
         }
         # All requested horizons: 1w, 2w, 3w, 1m, 2m, 3m, 6m
@@ -655,7 +658,7 @@ exactly where the edge sits.*
         subset=p_exp, cmap="RdYlGn", vmin=-3, vmax=3
     ).background_gradient(
         subset=p_win, cmap="Greens", vmin=40, vmax=70
-    )
+    ).format({c: "{:.2f}" for c in p_exp + p_win})
     st.dataframe(sty, use_container_width=True, hide_index=True)
 
     # ---- panel B: composite forecast bars ----
@@ -678,7 +681,7 @@ count more (|ρ| weighting).*
     fig.add_trace(go.Bar(
         x=composite_df["horizon"],
         y=composite_df["expected_pct"],
-        text=composite_df["expected_pct"].round(2).astype(str) + "%",
+        text=[f"{v:.2f}%" for v in composite_df["expected_pct"]],
         textposition="outside",
         marker_color=[
             "#26A69A" if v >= 0 else "#EF5350"
@@ -693,6 +696,7 @@ count more (|ρ| weighting).*
         showlegend=False,
     )
     fig.add_hline(y=0, line_color="gray", line_width=1)
+    fig.update_yaxes(tickformat=".2f", hoverformat=".2f")
     st.plotly_chart(fig, use_container_width=True)
 
     with st.expander("Glossary"):
@@ -1021,7 +1025,7 @@ e.g. base $10k × 30% conviction → $3k position
         elif v < -0.3: chip = "🟥 lean bear"
         else: chip = "⚪ neutral"
         cols[i].metric(r["horizon"], f"{v:+.2f}%",
-                       delta=f"{chip}  P(+)={pp:.0f}%")
+                       delta=f"{chip}  P(+)={pp:.2f}%")
 
     # ---- Composite aggregates ----
     short_mask = pred_df["horizon"].isin(["1w","2w","3w","1m","2m","3m"])
@@ -1065,21 +1069,21 @@ e.g. base $10k × 30% conviction → $3k position
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Short avg (1w-3m)", f"{short_avg:+.2f}%",
-              delta=f"P(+)={p_short:.0f}%")
+              delta=f"P(+)={p_short:.2f}%")
     c2.metric("Long avg (6m-12m)",
               f"{long_avg:+.2f}%" if not np.isnan(long_avg) else "—",
-              delta=f"P(+)={p_long:.0f}%" if not np.isnan(p_long) else "")
-    c3.metric("Conviction", f"{conv*100:.0f}%", delta=direction_label)
+              delta=f"P(+)={p_long:.2f}%" if not np.isnan(p_long) else "")
+    c3.metric("Conviction", f"{conv*100:.2f}%", delta=direction_label)
 
     # Conviction breakdown caption
     st.caption(
         f"**Conviction breakdown** → "
-        f"weighted forecast = `{weighted_dir:+.2f}%` (size factor {direction_mag*100:.0f}%) | "
+        f"weighted forecast = `{weighted_dir:+.2f}%` (size factor {direction_mag*100:.2f}%) | "
         f"avg model quality `{avg_quality if total_w>0 else 0:.3f}` "
-        f"(quality factor {quality_mag*100:.0f}%) | "
+        f"(quality factor {quality_mag*100:.2f}%) | "
         f"horizon agreement `{int(agree.sum())}/{len(agree)}` "
-        f"({agreement_frac*100:.0f}%) → "
-        f"**{conv*100:.0f}% conviction**"
+        f"({agreement_frac*100:.2f}%) → "
+        f"**{conv*100:.2f}% conviction**"
     )
 
     # ---- Forecast bar chart ----
@@ -1087,7 +1091,7 @@ e.g. base $10k × 30% conviction → $3k position
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=pred_df["horizon"], y=pred_df["exp_pct"],
-        text=[f"{v:+.2f}%<br>P(+)={p*100:.0f}%"
+        text=[f"{v:+.2f}%<br>P(+)={p*100:.2f}%"
               for v, p in zip(pred_df["exp_pct"], pred_df["p_positive"])],
         textposition="outside",
         marker_color=["#26A69A" if v >= 0 else "#EF5350" for v in pred_df["exp_pct"]],
@@ -1111,11 +1115,11 @@ e.g. base $10k × 30% conviction → $3k position
                       "log_loss_oos", "pseudo_r2_oos"]].copy()
     val_df["ic_oos"] = val_df["ic_oos"].round(4)
     val_df["r2_oos"] = val_df["r2_oos"].round(4)
-    val_df["hit_oos"] = (val_df["hit_oos"] * 100).round(0)
+    val_df["hit_oos"] = (val_df["hit_oos"] * 100).round(2)
     val_df["auc_oos"] = val_df["auc_oos"].round(3)
     val_df["brier_oos"] = val_df["brier_oos"].round(4)
     val_df["ic_clf_oos"] = val_df["ic_clf_oos"].round(4)
-    val_df["hit_clf_oos"] = (val_df["hit_clf_oos"] * 100).round(0)
+    val_df["hit_clf_oos"] = (val_df["hit_clf_oos"] * 100).round(2)
     val_df["log_loss_oos"] = val_df["log_loss_oos"].round(4)
     val_df["pseudo_r2_oos"] = val_df["pseudo_r2_oos"].round(4)
     val_df.columns = ["horizon", "n_OOS",
@@ -1136,7 +1140,8 @@ e.g. base $10k × 30% conviction → $3k position
               .background_gradient(subset=["CLF_IC"], cmap="RdYlGn", vmin=-0.1, vmax=0.25)
               .background_gradient(subset=["CLF_hit_%"], cmap="Greens", vmin=45, vmax=80)
               .background_gradient(subset=["CLF_LogLoss"], cmap="RdYlGn_r", vmin=0.55, vmax=0.72)
-              .background_gradient(subset=["CLF_pseudoR²"], cmap="RdYlGn", vmin=-0.02, vmax=0.05),
+              .background_gradient(subset=["CLF_pseudoR²"], cmap="RdYlGn", vmin=-0.02, vmax=0.05)
+              .format({"REG_hit_%": "{:.2f}", "CLF_hit_%": "{:.2f}"}),
         use_container_width=True, hide_index=True,
     )
 
@@ -1160,7 +1165,7 @@ e.g. base $10k × 30% conviction → $3k position
         col_order = [h for h in horizon_labels() if h in fi_pivot.columns]
         fi_pivot = fi_pivot[col_order]
         st.dataframe(fi_pivot.style.background_gradient(cmap="Greens", vmin=0, vmax=15)
-                     .format("{:.1f}"),
+                     .format("{:.2f}"),
                      use_container_width=True)
 
     # ---- Feature importance (classifier) ----
@@ -1180,7 +1185,7 @@ e.g. base $10k × 30% conviction → $3k position
             col_order = [h for h in horizon_labels() if h in fi_c.columns]
             fi_c = fi_c[col_order]
             st.dataframe(fi_c.style.background_gradient(cmap="Greens", vmin=0, vmax=15)
-                         .format("{:.1f}"),
+                         .format("{:.2f}"),
                          use_container_width=True)
 
     # ---- Current input row ----
@@ -1243,7 +1248,7 @@ with tab_scatter:
                 height=2000,
             )
             fig.update_xaxes(matches=None, showticklabels=True)
-            fig.update_yaxes(matches=None, showticklabels=True)
+            fig.update_yaxes(matches=None, showticklabels=True, tickformat=".2f", hoverformat=".2f")
 
             # Map each feature → xaxis id by matching facet-title annotation
             # paper coordinates against each xaxis's paper domain.
@@ -1426,7 +1431,7 @@ with tab_scatter:
                         "intercept": round(float(intercept), 6),
                         "n_cond": n_cond,
                         "mean_fwd_%": round(cond_mean_pct, 2) if not np.isnan(cond_mean_pct) else None,
-                        "win_%": round(cond_win, 0) if not np.isnan(cond_win) else None,
+                        "win_%": round(cond_win, 2) if not np.isnan(cond_win) else None,
                     })
             stats_df = pd.DataFrame(stat_rows)
             if not stats_df.empty:
@@ -1447,17 +1452,17 @@ with tab_scatter:
                 st.markdown(f"**Mean forward % return — conditional on {cur_sym_stats} at current value (±0.5σ window)**")
                 mfp = stats_df.pivot(index="feature", columns="horizon", values="mean_fwd_%")
                 mfp = mfp.reindex(index=top10, columns=horizons_pick or horizon_labels())
-                st.dataframe(mfp.style.background_gradient(cmap="RdYlGn", vmin=-3, vmax=3),
+                st.dataframe(mfp.style.background_gradient(cmap="RdYlGn", vmin=-3, vmax=3).format("{:.2f}"),
                              use_container_width=True)
 
                 st.markdown(f"**Win-rate % — conditional on {cur_sym_stats} at current value (±0.5σ window)**")
                 wrp = stats_df.pivot(index="feature", columns="horizon", values="win_%")
                 wrp = wrp.reindex(index=top10, columns=horizons_pick or horizon_labels())
-                st.dataframe(wrp.style.background_gradient(cmap="Greens", vmin=40, vmax=70),
+                st.dataframe(wrp.style.background_gradient(cmap="Greens", vmin=40, vmax=70).format("{:.2f}"),
                              use_container_width=True)
 
                 with st.expander("Full stats table (all columns)"):
-                    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+                    st.dataframe(stats_df.style.format({"mean_fwd_%": "{:.2f}", "win_%": "{:.2f}"}), use_container_width=True, hide_index=True)
 
 if not mode.startswith("Top 15"):
   with tab_scatter:
@@ -1492,6 +1497,7 @@ if not mode.startswith("Top 15"):
         labels={"fwd": "forward realized return (%)"},
         height=600,
     )
+    fig.update_yaxes(tickformat=".2f", hoverformat=".2f")
     # Use the latest feature value, even when the date filter excludes today or
     # recent rows have no realized forward return yet.
     cur_sym = selected_syms[0]
@@ -1540,7 +1546,7 @@ if not mode.startswith("Top 15"):
         })
     st.subheader("Per-horizon stats")
     stats_df = pd.DataFrame(rows).set_index("horizon")
-    st.dataframe(stats_df, use_container_width=True)
+    st.dataframe(stats_df.style.format({"mean_fwd_%": "{:.2f}"}), use_container_width=True)
 
     # Conditional fwd return at current value
     if cur_val is not None:
@@ -1560,9 +1566,11 @@ if not mode.startswith("Top 15"):
                 "ols_yhat_%": round(float(yhat * 100), 2),
                 "empirical_mean_% (±0.5σ window)": round(float(window.mean() * 100), 2) if len(window) else np.nan,
                 "n_window": len(window),
-                "empirical_p_pos": round(float((window > 0).mean()), 3) if len(window) else np.nan,
+                "empirical_p_pos_%": float((window > 0).mean() * 100) if len(window) else np.nan,
             })
-        st.dataframe(pd.DataFrame(cond_rows).set_index("horizon"), use_container_width=True)
+        cond_df = pd.DataFrame(cond_rows).set_index("horizon")
+        pct_cols = [c for c in cond_df if "_%" in c]
+        st.dataframe(cond_df.style.format({c: "{:.2f}" for c in pct_cols}), use_container_width=True)
 
 
 # ===== Tab: What-if scenario =====
@@ -1641,7 +1649,7 @@ with tab_scenario:
                 "feature": f, "horizon": h,
                 "n_window": len(window),
                 "mean_fwd_%": round(window.mean() * 100, 2),
-                "win_%": round((window > 0).mean() * 100, 0),
+                "win_%": round((window > 0).mean() * 100, 2),
             })
     sc_df = pd.DataFrame(rows)
 
@@ -1659,7 +1667,7 @@ with tab_scenario:
         exp_pct = float((sub["mean_fwd_%"] * w).sum() / w.sum())
         win_avg = float((sub["win_%"] * w).sum() / w.sum())
         comp_rows.append({"horizon": h, "exp_%": round(exp_pct, 2),
-                          "win_%": round(win_avg, 0)})
+                          "win_%": round(win_avg, 2)})
     comp_df = pd.DataFrame(comp_rows)
 
     # Composite metrics row
@@ -1674,19 +1682,19 @@ with tab_scenario:
                     else "🟥 lean bear" if v < -0.3
                     else "⚪ neutral")
             cols2[i].metric(r["horizon"], f"{v:+.2f}%",
-                            delta=f"{chip}  {int(r['win_%'])}% win")
+                            delta=f"{chip}  {r['win_%']:.2f}% win")
 
     # Heatmap-styled tables
     st.markdown("##### Mean fwd % per feature × horizon (your sliders)")
     mfp = sc_df.pivot(index="feature", columns="horizon", values="mean_fwd_%")
     mfp = mfp.reindex(index=top10_sc, columns=rec_horiz)
-    st.dataframe(mfp.style.background_gradient(cmap="RdYlGn", vmin=-3, vmax=3),
+    st.dataframe(mfp.style.background_gradient(cmap="RdYlGn", vmin=-3, vmax=3).format("{:.2f}"),
                  use_container_width=True)
 
     st.markdown("##### Win-rate % per feature × horizon (your sliders)")
     wrp = sc_df.pivot(index="feature", columns="horizon", values="win_%")
     wrp = wrp.reindex(index=top10_sc, columns=rec_horiz)
-    st.dataframe(wrp.style.background_gradient(cmap="Greens", vmin=40, vmax=70),
+    st.dataframe(wrp.style.background_gradient(cmap="Greens", vmin=40, vmax=70).format("{:.2f}"),
                  use_container_width=True)
 
     # ---- Scatter facets with the slider values as the vlines ----
@@ -1717,7 +1725,7 @@ with tab_scenario:
             height=2000,
         )
         figS.update_xaxes(matches=None, showticklabels=True)
-        figS.update_yaxes(matches=None, showticklabels=True)
+        figS.update_yaxes(matches=None, showticklabels=True, tickformat=".2f", hoverformat=".2f")
 
         # Reuse the same 2D paper-coord matching as scatter tab
         x_axes_s = {}
@@ -1861,6 +1869,8 @@ with tab_buckets:
     long_df = pd.DataFrame(rows)
     if long_df.empty:
         st.info("No data"); st.stop()
+    long_df["pct_green"] *= 100
+    long_df["pct_red"] *= 100
 
     fig = px.bar(
         long_df, x="bucket", y="mean_fwd", color="horizon", barmode="group",
@@ -1870,18 +1880,20 @@ with tab_buckets:
         },
         labels={"mean_fwd": "mean forward realized return (%)"},
         height=500,
-        hover_data=["n", "pct_green", "pct_red", "best_pct", "worst_pct"],
+        hover_data={"n": True, "pct_green": ":.2f", "pct_red": ":.2f",
+                    "best_pct": ":.2f", "worst_pct": ":.2f"},
     )
+    fig.update_yaxes(tickformat=".2f", hoverformat=".2f")
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("##### Mean forward realized return (%) per (bucket, horizon)")
-    st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="mean_fwd"),
+    st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="mean_fwd").style.format("{:.2f}"),
                  use_container_width=True)
 
     st.markdown("##### Win-rate (% of windows that finished green) per (bucket, horizon)")
     win_df = long_df.copy()
-    win_df["pct_green"] = (win_df["pct_green"] * 100).round(0)
-    st.dataframe(win_df.pivot(index="bucket", columns="horizon", values="pct_green"),
+    win_df["pct_green"] = win_df["pct_green"].round(2)
+    st.dataframe(win_df.pivot(index="bucket", columns="horizon", values="pct_green").style.format("{:.2f}"),
                  use_container_width=True)
 
     st.markdown("##### Sample count per (bucket, horizon)")
@@ -1890,9 +1902,9 @@ with tab_buckets:
 
     st.markdown("##### Best / worst single-window % return per bucket × horizon")
     st.caption("Tail behaviour. Read alongside win-rate to see if a positive mean comes from one giant rally or steady gains.")
-    st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="best_pct").round(1),
+    st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="best_pct").style.format("{:.2f}"),
                  use_container_width=True)
-    st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="worst_pct").round(1),
+    st.dataframe(long_df.pivot(index="bucket", columns="horizon", values="worst_pct").style.format("{:.2f}"),
                  use_container_width=True)
 
 
@@ -1957,7 +1969,7 @@ with tab_regime:
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("VIX", f"{last['vix']:.1f}")
-    m2.metric(f"Realized vol {int(_rv)}d", f"{last['rv']:.1f}%")
+    m2.metric(f"Realized vol {int(_rv)}d", f"{last['rv']:.2f}%")
     m3.metric("VIX3M − VIX", f"{last['term_spread']:+.2f}")
     m4.metric("MACD leg-sum ÷ price", f"{last['macd_runsum']:+.4f}")
 
@@ -1971,6 +1983,7 @@ with tab_regime:
     figp.update_layout(showlegend=False, height=240,
                        margin=dict(l=10, r=10, t=30, b=10),
                        title="Today's state probabilities")
+    figp.update_yaxes(tickformat=".2%", hoverformat=".2%")
     st.plotly_chart(figp, use_container_width=True)
 
     # VIX timeline coloured by regime
@@ -1992,8 +2005,9 @@ with tab_regime:
         st.dataframe(res.regime_means.round(2), use_container_width=True)
         st.markdown("##### Days spent in each regime")
         vc = reg_df["regime"].value_counts().reindex(_vr.REGIME_NAMES).fillna(0).astype(int)
-        share = (vc / vc.sum() * 100).round(1)
-        st.dataframe(pd.DataFrame({"days": vc, "% of history": share}),
+        share = vc / vc.sum() * 100
+        st.dataframe(pd.DataFrame({"days": vc, "% of history": share})
+                     .style.format({"% of history": "{:.2f}"}),
                      use_container_width=True)
     with colB:
         st.markdown("##### Transition matrix  P(next | current)")
@@ -2003,7 +2017,8 @@ with tab_regime:
             figm = go.Figure(go.Heatmap(
                 z=tm.values, x=_vr.REGIME_NAMES, y=_vr.REGIME_NAMES,
                 colorscale="Blues", zmin=0, zmax=1,
-                text=np.round(tm.values, 2), texttemplate="%{text}"))
+                texttemplate="%{z:.2%}",
+                hovertemplate="current %{y}<br>next %{x}: %{z:.2%}<extra></extra>"))
             figm.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10),
                                yaxis_title="current", xaxis_title="next")
             st.plotly_chart(figm, use_container_width=True)
@@ -2024,15 +2039,15 @@ with tab_regime:
         figf = go.Figure(go.Heatmap(
             z=_heat.values, x=_vr.REGIME_NAMES, y=_order,
             colorscale="Blues", zmin=0, zmax=1,
-            text=np.round(_heat.values, 2), texttemplate="%{text}",
-            hovertemplate="horizon %{y}<br>%{x}: %{z:.1%}<extra></extra>"))
+            texttemplate="%{z:.2%}",
+            hovertemplate="horizon %{y}<br>%{x}: %{z:.2%}<extra></extra>"))
         figf.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10),
                            yaxis_title="horizon ahead", xaxis_title="regime",
                            yaxis=dict(autorange="reversed"))
         st.plotly_chart(figf, use_container_width=True)
 
         _summ = fc.loc[_order, ["most_likely", "p(most_likely)", "exp_VIX"]].copy()
-        _summ["p(most_likely)"] = (_summ["p(most_likely)"] * 100).round(0).astype(int).astype(str) + "%"
+        _summ["p(most_likely)"] = _summ["p(most_likely)"].map(lambda p: f"{p * 100:.2f}%")
         _summ["exp_VIX"] = _summ["exp_VIX"].round(1)
         _summ.columns = ["Most likely regime", "Probability", "Expected VIX"]
         st.dataframe(_summ, use_container_width=True)

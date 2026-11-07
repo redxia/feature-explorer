@@ -15,6 +15,7 @@ Tabs:
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -27,6 +28,12 @@ from scipy.stats import spearmanr
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+
+# Streamlit can rerun this script while retaining the feature module from an
+# earlier deployment. Reload it if the new month horizons are missing.
+from src.research import feature_panel as _feature_panel  # noqa: E402
+if not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS):
+    importlib.reload(_feature_panel)
 
 from src.research.feature_panel import (  # noqa: E402
     load_panel, available_symbols, feature_columns, horizon_labels, FWD_HORIZONS,
@@ -115,11 +122,13 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
     panel = panel[(pd.to_datetime(panel["date"]) >= pd.Timestamp(d0))
                   & (pd.to_datetime(panel["date"]) <= pd.Timestamp(d1))]
 
-plot_horizons = [h for h in horizon_labels() if h.endswith("m")]
+plot_horizons = [h for h in ("1m", "2m", "3m", "4m", "5m", "6m", "9m", "12m")
+                 if h in FWD_HORIZONS]
 horizons_pick = st.sidebar.multiselect(
     "Horizons to plot",
     options=plot_horizons,
-    default=["1m", "2m", "3m", "4m", "5m", "6m"],
+    default=[h for h in ("1m", "2m", "3m", "4m", "5m", "6m")
+             if h in plot_horizons],
 )
 
 # ---- Data refresh ----

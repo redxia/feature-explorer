@@ -5,7 +5,7 @@ Run:
 
 Tabs:
   1. Single-feature scatter — feature on x, fwd return on y, one color per
-     horizon (1w, 2w, 3w, 1m, 2m, 3m, 6m, 9m, 12m), with OLS line per horizon.
+     horizon (1m, 2m, 3m, 4m, 5m, 6m, 9m, 12m), with OLS line per horizon.
      Shows current feature value as vertical marker.
   2. Correlation matrix — pick multiple features, heatmap of corr(feature, fwd_h)
      for every horizon.
@@ -55,7 +55,7 @@ def cached_panel(symbols: tuple[str, ...], version: float) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Loading symbol...")
-def cached_per_symbol(sym: str, version: float) -> pd.DataFrame:
+def cached_per_symbol(sym: str, version: float, horizons_version: tuple) -> pd.DataFrame:
     """Per-symbol cache, keyed on data version so a refresh always reloads."""
     return load_panel([sym])
 
@@ -81,8 +81,10 @@ if not selected_syms:
 # Per-symbol cache; concat is fast vs reloading whole panel.
 # _data_version() in the key forces a reload whenever the parquet files change.
 _ver = _data_version()
-panel = pd.concat([cached_per_symbol(s, _ver) for s in selected_syms],
+panel = pd.concat([cached_per_symbol(s, _ver, tuple(FWD_HORIZONS.items()))
+                   for s in selected_syms],
                   ignore_index=True)
+latest_panel = panel
 
 # ---------- data freshness banner ----------
 _latest = pd.to_datetime(panel["date"].max()).date()
@@ -113,10 +115,11 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
     panel = panel[(pd.to_datetime(panel["date"]) >= pd.Timestamp(d0))
                   & (pd.to_datetime(panel["date"]) <= pd.Timestamp(d1))]
 
+plot_horizons = [h for h in horizon_labels() if h.endswith("m")]
 horizons_pick = st.sidebar.multiselect(
     "Horizons to plot",
-    options=horizon_labels(),
-    default=["1w", "2w", "3w", "1m", "2m", "3m", "6m"],
+    options=plot_horizons,
+    default=["1m", "2m", "3m", "4m", "5m", "6m"],
 )
 
 # ---- Data refresh ----
@@ -1181,12 +1184,12 @@ with tab_scatter:
                     horizontal=True, index=0)
 
     if mode.startswith("Top 15"):
-        st.markdown("**Top 15 features by mean |Spearman ρ| across all horizons.**")
+        st.markdown("**Top 15 features by mean |Spearman ρ| across plotted horizons.**")
         # Rank features by mean |ρ|
         ranked = []
         for f in feature_columns():
             sps = []
-            for h in horizon_labels():
+            for h in horizons_pick or plot_horizons:
                 col = f"fwd_{h}"
                 sub = panel.dropna(subset=[f, col])
                 if len(sub) < 100: continue
@@ -1200,7 +1203,7 @@ with tab_scatter:
         # Build long-format df for facet plot
         long_blocks = []
         for f in top10:
-            for h in horizons_pick or horizon_labels():
+            for h in horizons_pick or plot_horizons:
                 col = f"fwd_{h}"
                 sub = panel.dropna(subset=[f, col])[[f, col]].copy()
                 sub.columns = ["x", "fwd"]
@@ -1230,8 +1233,7 @@ with tab_scatter:
             # paper coordinates against each xaxis's paper domain.
             # Annotations carry "feature=NAME" text (still raw at this point).
             cur_sym_top = selected_syms[0]
-            cur_panel = panel[panel["symbol"] == cur_sym_top].sort_values("date")
-            cur_row_top = cur_panel.iloc[-1] if len(cur_panel) else None
+            cur_panel = latest_panel[latest_panel["symbol"] == cur_sym_top].sort_values("date")
 
             # Build full (xaxis_id, yaxis_id, x_mid, y_mid) for each subplot.
             # In plotly facet, xaxis N is paired with yaxis N (same trailing index).
@@ -1296,7 +1298,7 @@ with tab_scatter:
 
             # Add vline at current value + dashed lines marking ±0.5σ window
             # (the window used in conditional win-rate / mean-fwd calc).
-            if cur_row_top is not None:
+            if not cur_panel.empty:
                 # Pre-compute std per feature from full panel (same source the
                 # stats table uses — keeps window alignment consistent).
                 feat_std = {}
@@ -1305,57 +1307,64 @@ with tab_scatter:
                     feat_std[f] = float(s.std()) if len(s) > 30 else None
 
                 for f in top10:
-                    cv = cur_row_top.get(f)
-                    if cv is None or pd.isna(cv): continue
+                    feature_rows = cur_panel[np.isfinite(pd.to_numeric(cur_panel[f], errors="coerce"))]
+                    if feature_rows.empty: continue
+                    cv = float(feature_rows.iloc[-1][f])
                     xref = feat_to_xref.get(f)
                     if not xref: continue
                     yref = "y" + xref[1:]
-                    cv = float(cv)
                     sigma = feat_std.get(f)
                     half = (sigma * 0.5) if sigma else None
-                    try:
-                        # Shaded ±0.5σ band (light yellow)
-                        if half is not None:
-                            fig.add_shape(
-                                type="rect", xref=xref, yref=yref + " domain",
-                                x0=cv - half, x1=cv + half, y0=0, y1=1,
-                                fillcolor="rgba(255, 215, 0, 0.15)",
-                                line=dict(width=0),
-                                layer="below",
-                            )
-                        # Solid vline at current value
+                    # Facet axes otherwise auto-range from rows with known future
+                    # returns, which exclude the recent current-value observation.
+                    plotted_x = pd.to_numeric(big.loc[big["feature"] == f, "x"], errors="coerce")
+                    plotted_x = plotted_x[np.isfinite(plotted_x)]
+                    low = min(float(plotted_x.min()), cv - (half or 0)) if not plotted_x.empty else cv - (half or 0)
+                    high = max(float(plotted_x.max()), cv + (half or 0)) if not plotted_x.empty else cv + (half or 0)
+                    pad = max((high - low) * 0.04, abs(cv) * 0.02, 1e-6)
+                    fig.layout["xaxis" + xref[1:]].range = [low - pad, high + pad]
+                    # Shaded ±0.5σ band (light yellow)
+                    if half is not None:
+                        fig.add_shape(
+                            type="rect", xref=xref, yref=yref + " domain",
+                            x0=cv - half, x1=cv + half, y0=0, y1=1,
+                            fillcolor="rgba(255, 215, 0, 0.15)",
+                            line=dict(width=0),
+                            layer="below",
+                        )
+                    # Solid vline at current value
+                    fig.add_shape(
+                        type="line", xref=xref, yref=yref + " domain",
+                        x0=cv, x1=cv, y0=0, y1=1,
+                        line=dict(color="black", width=2.5, dash="dash"),
+                    )
+                    # Dotted lines at ±0.5σ edges
+                    if half is not None:
                         fig.add_shape(
                             type="line", xref=xref, yref=yref + " domain",
-                            x0=cv, x1=cv, y0=0, y1=1,
-                            line=dict(color="black", width=1.5, dash="dash"),
+                            x0=cv - half, x1=cv - half, y0=0, y1=1,
+                            line=dict(color="rgba(170,140,0,0.85)",
+                                      width=1, dash="dot"),
                         )
-                        # Dotted lines at ±0.5σ edges
-                        if half is not None:
-                            fig.add_shape(
-                                type="line", xref=xref, yref=yref + " domain",
-                                x0=cv - half, x1=cv - half, y0=0, y1=1,
-                                line=dict(color="rgba(170,140,0,0.85)",
-                                          width=1, dash="dot"),
-                            )
-                            fig.add_shape(
-                                type="line", xref=xref, yref=yref + " domain",
-                                x0=cv + half, x1=cv + half, y0=0, y1=1,
-                                line=dict(color="rgba(170,140,0,0.85)",
-                                          width=1, dash="dot"),
-                            )
-                        # Label
-                        label = (f"now={cv:.3f}  ±0.5σ=[{cv-half:.3f}, {cv+half:.3f}]"
-                                 if half is not None else f"now={cv:.3f}")
-                        fig.add_annotation(
-                            xref=xref, yref=yref + " domain",
-                            x=cv, y=1.02, text=label,
-                            showarrow=False, font=dict(size=10, color="black"),
-                            xanchor="left",
+                        fig.add_shape(
+                            type="line", xref=xref, yref=yref + " domain",
+                            x0=cv + half, x1=cv + half, y0=0, y1=1,
+                            line=dict(color="rgba(170,140,0,0.85)",
+                                      width=1, dash="dot"),
                         )
-                    except Exception:
-                        pass
+                    # Label
+                    feature_date = pd.to_datetime(feature_rows.iloc[-1]["date"]).date()
+                    marker_name = "now" if feature_date == pd.to_datetime(cur_panel.iloc[-1]["date"]).date() else "latest"
+                    label = (f"{marker_name}={cv:.3f}  ±0.5σ=[{cv-half:.3f}, {cv+half:.3f}]"
+                             if half is not None else f"{marker_name}={cv:.3f}")
+                    fig.add_annotation(
+                        xref=xref, yref=yref + " domain",
+                        x=cv, y=1.02, text=label,
+                        showarrow=False, font=dict(size=10, color="black"),
+                        xanchor="left",
+                    )
             st.plotly_chart(fig, use_container_width=True)
-            st.caption("⬛ dashed line = current value | 🟨 shaded band = ±0.5σ window "
+            st.caption("⬛ dashed line = latest available feature value | 🟨 shaded band = ±0.5σ window "
                        "used for conditional win-rate & mean-fwd calculations.")
 
             # ---- per-feature, per-horizon stats table (under the plots) ----
@@ -1365,15 +1374,13 @@ with tab_scatter:
                        "win_% = % of windows finished green.")
             # Use first selected symbol's current value for ±0.5σ conditional stats
             cur_sym_stats = selected_syms[0]
-            cur_p = panel[panel["symbol"] == cur_sym_stats].sort_values("date")
-            cur_row_stats = cur_p.iloc[-1] if len(cur_p) else None
+            cur_p = latest_panel[latest_panel["symbol"] == cur_sym_stats].sort_values("date")
 
             stat_rows = []
             for f in top10:
-                cur_val = (float(cur_row_stats[f])
-                           if cur_row_stats is not None and not pd.isna(cur_row_stats.get(f))
-                           else None)
-                for h in horizons_pick or horizon_labels():
+                valid_cur = cur_p[np.isfinite(pd.to_numeric(cur_p[f], errors="coerce"))]
+                cur_val = float(valid_cur.iloc[-1][f]) if not valid_cur.empty else None
+                for h in horizons_pick or plot_horizons:
                     col = f"fwd_{h}"
                     sub = panel.dropna(subset=[f, col])
                     if len(sub) < 30:
@@ -1412,7 +1419,7 @@ with tab_scatter:
                 st.markdown("**|Spearman ρ| heatmap (feature × horizon)**")
                 heat = stats_df.pivot(index="feature", columns="horizon",
                                       values="spearman").abs()
-                heat = heat.reindex(index=top10, columns=horizon_labels())
+                heat = heat.reindex(index=top10, columns=horizons_pick or plot_horizons)
                 fig2 = go.Figure(data=go.Heatmap(
                     z=heat.values, x=heat.columns, y=heat.index,
                     zmin=0, zmax=0.3, colorscale="Greens",
@@ -1471,13 +1478,27 @@ if not mode.startswith("Top 15"):
     )
     if log_y:
         fig.update_yaxes(type="log")
-    # Mark current value (latest bar in panel for first selected sym)
+    # Use the latest feature value, even when the date filter excludes today or
+    # recent rows have no realized forward return yet.
     cur_sym = selected_syms[0]
-    cur_row = panel[panel["symbol"] == cur_sym].sort_values("date").iloc[-1]
-    cur_val = float(cur_row[feat]) if pd.notna(cur_row.get(feat)) else None
+    sym_rows = latest_panel[latest_panel["symbol"] == cur_sym].sort_values("date")
+    valid_rows = sym_rows[np.isfinite(pd.to_numeric(sym_rows[feat], errors="coerce"))]
+    cur_val = float(valid_rows.iloc[-1][feat]) if not valid_rows.empty else None
     if cur_val is not None:
-        fig.add_vline(x=cur_val, line_dash="dash", line_color="gray",
-                      annotation_text=f"{cur_sym} now = {cur_val:.4f}")
+        cur_date = pd.to_datetime(valid_rows.iloc[-1]["date"]).date()
+        marker_label = "Current" if cur_date == pd.to_datetime(sym_rows.iloc[-1]["date"]).date() else "Latest available"
+        x_values = pd.to_numeric(long_df[feat], errors="coerce")
+        x_values = x_values[np.isfinite(x_values)]
+        x_min = min(float(x_values.min()), cur_val) if not x_values.empty else cur_val
+        x_max = max(float(x_values.max()), cur_val) if not x_values.empty else cur_val
+        pad = max((x_max - x_min) * 0.04, abs(cur_val) * 0.02, 1e-6)
+        fig.update_xaxes(range=[x_min - pad, x_max + pad])
+        fig.add_vline(x=cur_val, line_dash="dash", line_color="black",
+                      line_width=2.5,
+                      annotation_text=f"{marker_label} {cur_sym} ({cur_date}): {cur_val:.4f}",
+                      annotation_position="top left")
+    else:
+        st.warning(f"No available {feat} value for {cur_sym}; current-value marker cannot be shown.")
     st.plotly_chart(fig, use_container_width=True)
 
     # Per-horizon stats table

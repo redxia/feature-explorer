@@ -2,7 +2,8 @@
 
 Loads daily bars from data/raw/daily/{SYMBOL}.parquet, computes a wide set of
 daily technical features, and joins forward log-returns at common research
-horizons (5/10/15/21/42/63/126/189/252 trading days = 1w/2w/3w/1m/2m/3m/6m/9m/12m).
+horizons (5/10/15/21/42/63/84/105/126/189/252 trading days =
+1w/2w/3w/1m/2m/3m/4m/5m/6m/9m/12m).
 
 Returns one DataFrame indexed by (symbol, date), columns = features + fwd_*.
 """
@@ -27,6 +28,8 @@ FWD_HORIZONS = {
     "1m":  21,
     "2m":  42,
     "3m":  63,
+    "4m":  84,
+    "5m":  105,
     "6m":  126,
     "9m":  189,
     "12m": 252,

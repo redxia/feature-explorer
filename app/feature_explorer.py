@@ -347,11 +347,12 @@ if st.sidebar.button("♻️ Refresh + retrain permanently (GitHub)",
 
 # ---------- tabs ----------
 
-(tab_dash, tab_lgbm, tab_scatter, tab_scenario, tab_corr, tab_buckets,
- tab_regime) = st.tabs([
-    "Signal Dashboard (empirical)", "🤖 LightGBM Signal Dashboard",
+(tab_dash, tab_scatter, tab_scenario, tab_corr, tab_buckets,
+ tab_regime, tab_lgbm) = st.tabs([
+    "Signal Dashboard (empirical)",
     "Scatter vs fwd returns", "What-if scenario",
-    "Correlation matrix", "Quantile buckets", "🌡️ Vol Regimes (HMM)"
+    "Correlation matrix", "Quantile buckets", "🌡️ Vol Regimes (HMM)",
+    "🤖 LightGBM Signal Dashboard"
 ])
 
 
@@ -1267,8 +1268,9 @@ with tab_scatter:
         for f in top10:
             for h in horizons_pick or plot_horizons:
                 col = f"fwd_{h}"
-                sub = panel.dropna(subset=[f, col])[[f, col]].copy()
-                sub.columns = ["x", "fwd"]
+                sub = panel.dropna(subset=[f, col])[["symbol", "date", f, col]].copy()
+                sub = sub.rename(columns={f: "x", col: "fwd"})
+                sub["date"] = pd.to_datetime(sub["date"]).dt.strftime("%Y-%m-%d")
                 sub["fwd"] *= 100
                 sub["feature"] = f
                 sub["horizon"] = h
@@ -1286,6 +1288,7 @@ with tab_scatter:
                     "feature": top10,
                 },
                 opacity=0.35, trendline="ols", trendline_scope="trace",
+                hover_data=["symbol", "date"],
                 labels={"x": "feature value", "fwd": "forward realized return (%)"},
                 height=2000,
             )
@@ -1418,8 +1421,8 @@ with tab_scatter:
                     # Label
                     feature_date = pd.to_datetime(feature_rows.iloc[-1]["date"]).date()
                     marker_name = "now" if feature_date == pd.to_datetime(cur_panel.iloc[-1]["date"]).date() else "latest"
-                    label = (f"{marker_name}={cv:.3f}  ±0.5σ=[{cv-half:.3f}, {cv+half:.3f}]"
-                             if half is not None else f"{marker_name}={cv:.3f}")
+                    label = (f"{marker_name} {feature_date}: {cv:.3f}<br>±0.5σ=[{cv-half:.3f}, {cv+half:.3f}]"
+                             if half is not None else f"{marker_name} {feature_date}: {cv:.3f}")
                     fig.add_annotation(
                         xref=xref, yref=yref + " domain",
                         x=cv, y=1.02, text=label,
@@ -1428,7 +1431,8 @@ with tab_scatter:
                     )
             st.plotly_chart(fig, use_container_width=True)
             st.caption("⬛ dashed line = latest available feature value | 🟨 shaded band = ±0.5σ window "
-                       "used for conditional win-rate & mean-fwd calculations.")
+                       "used for conditional win-rate & mean-fwd calculations. "
+                       "Hover over a point for its symbol and date.")
 
             # ---- per-feature, per-horizon stats table (under the plots) ----
             st.markdown("##### Stats per feature × horizon")
@@ -1562,6 +1566,7 @@ if not mode.startswith("Top 15"):
     else:
         st.warning(f"No available {feat} value for {cur_sym}; current-value marker cannot be shown.")
     st.plotly_chart(fig, use_container_width=True)
+    st.caption("Hover over a point for the feature date and symbol.")
 
     # Per-horizon stats table
     rows = []

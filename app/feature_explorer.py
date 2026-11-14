@@ -127,7 +127,7 @@ non_overlapping = st.sidebar.checkbox(
     "Non-overlapping return windows", value=True,
     help="For each symbol and horizon, retain forward-return samples at least "
          "one full horizon apart.")
-st.sidebar.subheader("Exclude peak-to-trough periods")
+st.sidebar.subheader("Exclude historical periods")
 excluded_crises = tuple(key for key, (label, start, end) in CRISIS_WINDOWS.items()
                         if st.sidebar.checkbox(
                             f"{label} ({start} to {end})", value=True,

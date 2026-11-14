@@ -36,14 +36,19 @@ FWD_HORIZONS = {
     "12m": 252,
 }
 
-# S&P 500 peak-to-trough dates (inclusive), used for all symbols so pooled
-# return samples are filtered on the same market-wide crisis windows.
-# Source: S&P Dow Jones Indices, "Natural Selection: Tactics and Strategy with
-# Equity Sectors", Appendix C (July 2024).
+# Broad-market declines and event windows (inclusive), applied to every symbol.
+# The 2018 and 2011 windows start with the named event and end at a later market
+# low; their labels do not imply that the event alone caused the entire decline.
+# Sources: S&P DJI "Natural Selection" (2024); SIFMA 2023 market compendium;
+# USTR June 15, 2018 finalized tariff list; SEC filing 0001193125-19-057031;
+# S&P Global Ratings sovereign history; S&P Global 2011 correction chronology.
 CRISIS_WINDOWS = {
     "tech_bubble": ("Tech bubble", "2000-09-01", "2002-10-09"),
     "financial_crisis": ("Financial crisis", "2007-10-09", "2009-03-09"),
+    "downgrade_2011": ("2011 U.S. downgrade period", "2011-08-05", "2011-10-03"),
+    "tariffs_2018": ("2018 tariff period", "2018-06-15", "2018-12-24"),
     "covid_2020": ("2020 crash", "2020-02-19", "2020-03-23"),
+    "bear_2022": ("2022 market decline", "2022-01-03", "2022-10-12"),
 }
 
 

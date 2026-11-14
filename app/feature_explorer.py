@@ -33,12 +33,14 @@ sys.path.insert(0, str(REPO_ROOT))
 # earlier deployment. Reload it if the new month horizons are missing.
 from src.research import feature_panel as _feature_panel  # noqa: E402
 if (not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS)
-        or getattr(_feature_panel, "RETURN_SCHEMA_VERSION", None) != "simple_v1"):
+        or getattr(_feature_panel, "RETURN_SCHEMA_VERSION", None) != "simple_v1"
+        or not hasattr(_feature_panel, "remove_overlapping_returns")):
     importlib.reload(_feature_panel)
 
 from src.research.feature_panel import (  # noqa: E402
     load_panel, available_symbols, feature_columns, horizon_labels,
-    FWD_HORIZONS, RETURN_SCHEMA_VERSION,
+    FWD_HORIZONS, RETURN_SCHEMA_VERSION, CRISIS_WINDOWS,
+    exclude_crisis_windows, remove_overlapping_returns,
 )
 
 st.set_page_config(page_title="Feature Explorer", layout="wide")
@@ -114,17 +116,39 @@ else:
 st.sidebar.header("Filters")
 min_date = pd.to_datetime(panel["date"].min())
 max_date = pd.to_datetime(panel["date"].max())
-default_start = max(min_date.date(), pd.Timestamp("2008-01-01").date())
+default_start = min_date.date()
 date_range = st.sidebar.date_input(
-    "Date range (default starts 2008-01-01)",
+    "Date range (full history by default)",
     value=(default_start, max_date.date()),
     min_value=min_date.date(),
     max_value=max_date.date(),
 )
+non_overlapping = st.sidebar.checkbox(
+    "Non-overlapping return windows", value=True,
+    help="For each symbol and horizon, retain forward-return samples at least "
+         "one full horizon apart.")
+st.sidebar.subheader("Exclude peak-to-trough periods")
+excluded_crises = tuple(key for key, (label, start, end) in CRISIS_WINDOWS.items()
+                        if st.sidebar.checkbox(
+                            f"{label} ({start} to {end})", value=True,
+                            key=f"exclude_{key}"))
+st.sidebar.caption("Applies to every symbol and return horizon. Forward windows "
+                   "that touch a selected period are excluded too.")
+unavailable_crises = [CRISIS_WINDOWS[key][0] for key in excluded_crises
+                       if (pd.Timestamp(CRISIS_WINDOWS[key][2]) < min_date
+                           or pd.Timestamp(CRISIS_WINDOWS[key][1]) > max_date)]
+if unavailable_crises:
+    st.sidebar.caption("Outside loaded history: " + ", ".join(unavailable_crises))
+if non_overlapping:
+    panel = remove_overlapping_returns(panel)
+panel = exclude_crisis_windows(panel, excluded_crises)
 if isinstance(date_range, tuple) and len(date_range) == 2:
     d0, d1 = date_range
     panel = panel[(pd.to_datetime(panel["date"]) >= pd.Timestamp(d0))
                   & (pd.to_datetime(panel["date"]) <= pd.Timestamp(d1))]
+if panel.empty:
+    st.warning("No data remains after the date and crisis filters.")
+    st.stop()
 
 plot_horizons = [h for h in ("1m", "2m", "3m", "4m", "5m", "6m", "9m", "12m")
                  if h in FWD_HORIZONS]
@@ -726,7 +750,8 @@ count more (|ρ| weighting).*
 # ===== Tab: 🤖 LightGBM Signal Dashboard =====
 with tab_lgbm:
     from src.research import lgbm_dash_model as lgbm_mod
-    if getattr(lgbm_mod, "MODEL_RETURN_SCHEMA_VERSION", None) != RETURN_SCHEMA_VERSION:
+    if (getattr(lgbm_mod, "MODEL_RETURN_SCHEMA_VERSION", None) != RETURN_SCHEMA_VERSION
+            or "non_overlapping" not in lgbm_mod.SymbolBundle.__dataclass_fields__):
         importlib.reload(lgbm_mod)
 
     st.subheader("🤖 LightGBM Signal Dashboard")
@@ -971,8 +996,9 @@ e.g. base $10k × 30% conviction → $3k position
     target_l = st.selectbox("Target symbol", options=selected_syms, index=0,
                             key="lgbm_target")
 
-    bundle = lgbm_mod.load_bundle(target_l)
-    trained_list = lgbm_mod.list_trained()
+    bundle = lgbm_mod.load_bundle(target_l, excluded_crises=excluded_crises,
+                                  non_overlapping=non_overlapping)
+    trained_list = lgbm_mod.list_trained(excluded_crises, non_overlapping)
 
     btn_col1, btn_col2, btn_col3 = st.columns([2, 2, 4])
     with btn_col1:
@@ -981,13 +1007,16 @@ e.g. base $10k × 30% conviction → $3k position
             with st.spinner(f"Training LightGBM models for {target_l} "
                             f"(walk-forward + final, ~30-90s)..."):
                 try:
-                    bundle = lgbm_mod.train_symbol(target_l)
+                    bundle = lgbm_mod.train_symbol(
+                        target_l, excluded_crises=excluded_crises,
+                        non_overlapping=non_overlapping)
                     st.success(f"Trained {len(bundle.horizons)} horizons "
                                f"on panel {bundle.panel_start} → {bundle.panel_end}")
                 except Exception as e:
                     st.error(f"Training failed: {e}")
     with btn_col2:
-        st.caption(f"**Trained symbols:** {', '.join(trained_list) if trained_list else '(none)'}")
+        st.caption(f"**Trained for selected exclusions:** "
+                   f"{', '.join(trained_list) if trained_list else '(none)'}")
     with btn_col3:
         if bundle is not None:
             st.caption(f"**{target_l}** trained {bundle.trained_at:%Y-%m-%d %H:%M} UTC | "
@@ -995,205 +1024,204 @@ e.g. base $10k × 30% conviction → $3k position
                        f"{bundle.panel_rows} rows")
 
     if bundle is None:
-        st.info(f"No trained model for **{target_l}** yet. "
-                f"Click 🔧 Train above. First run takes 30-90s.")
-        st.stop()
-
-    # Get current row for target
-    sym_panel_l = panel[panel["symbol"] == target_l].sort_values("date").reset_index(drop=True)
-    if sym_panel_l.empty:
-        st.warning(f"No panel data for {target_l}"); st.stop()
-    cur_row_l = sym_panel_l.iloc[-1]
-
-    # Predict
-    pred_df = lgbm_mod.predict_current(bundle, cur_row_l)
-    if pred_df.empty:
-        st.warning("Model has no horizons populated"); st.stop()
-
-    # ---- Headline trade rec ----
-    st.markdown("## 🎯 Trade Recommendation (LightGBM)")
-    rec_horiz = ["1w", "2w", "3w", "1m", "2m", "3m", "6m", "9m", "12m"]
-    rec_show = pred_df[pred_df["horizon"].isin(rec_horiz)].copy()
-    rec_show["horizon"] = pd.Categorical(rec_show["horizon"], categories=rec_horiz, ordered=True)
-    rec_show = rec_show.sort_values("horizon")
-    cols = st.columns(len(rec_show))
-    for i, (_, r) in enumerate(rec_show.iterrows()):
-        v = float(r["exp_pct"]); pp = float(r["p_positive"]) * 100
-        if v > 1.0: chip = "🟢 BULL"
-        elif v > 0.3: chip = "🟩 lean bull"
-        elif v < -1.0: chip = "🔴 BEAR"
-        elif v < -0.3: chip = "🟥 lean bear"
-        else: chip = "⚪ neutral"
-        cols[i].metric(r["horizon"], f"{v:+.2f}%",
-                       delta=f"{chip}  P(+)={pp:.2f}%")
-
-    # ---- Composite aggregates ----
-    short_mask = pred_df["horizon"].isin(["1w","2w","3w","1m","2m","3m"])
-    long_mask = pred_df["horizon"].isin(["6m","9m","12m"])
-    short_avg = float(pred_df.loc[short_mask, "exp_pct"].mean())
-    long_avg = float(pred_df.loc[long_mask, "exp_pct"].mean()) \
-        if long_mask.any() else float("nan")
-    p_short = float(pred_df.loc[short_mask, "p_positive"].mean()) * 100
-    p_long = float(pred_df.loc[long_mask, "p_positive"].mean()) * 100 \
-        if long_mask.any() else float("nan")
-
-    # ---- Quality-weighted, agreement-aware Conviction ----
-    # 1. Per-horizon quality from OOS IC + AUC (cap negatives at 0)
-    ic_w = pred_df["ic_oos"].clip(lower=0).fillna(0)               # 0..~0.25
-    auc_lift = (pred_df["auc_oos"] - 0.5).clip(lower=0).fillna(0)  # 0..~0.15
-    quality = ic_w * (1 + 4 * auc_lift)                            # combined
-
-    # 2. Agreement between regressor and classifier
-    sign_reg = np.sign(pred_df["exp_pct"].fillna(0))
-    sign_clf = np.sign(pred_df["p_positive"].fillna(0.5) - 0.5)
-    agree = ((sign_reg * sign_clf) >= 0).astype(float)             # 1 if agree, 0 if conflict
-    eff_w = quality * agree                                        # zero-weight conflicting horizons
-
-    # 3. Quality-weighted directional forecast (% units)
-    total_w = float(eff_w.sum())
-    if total_w > 0:
-        weighted_dir = float((pred_df["exp_pct"] * eff_w).sum() / total_w)
-        avg_quality = float(eff_w.sum() / max(agree.sum(), 1))
-        direction_mag = min(abs(weighted_dir) / 2.0, 1.0)          # 2% move → 100%
-        quality_mag = min(avg_quality / 0.10, 1.0)                 # IC*AUClift~0.10 → 100%
-        agreement_frac = float(agree.sum() / len(agree))           # 0..1
-        conv = direction_mag * quality_mag * agreement_frac
+        st.info(f"No trained model for **{target_l}** with the selected crisis "
+                "exclusions. Click Train above to fit this selection.")
     else:
-        weighted_dir = 0.0
-        direction_mag = quality_mag = agreement_frac = 0.0
-        conv = 0.0
+        # Get current row for target
+        sym_panel_l = panel[panel["symbol"] == target_l].sort_values("date").reset_index(drop=True)
+        if sym_panel_l.empty:
+            st.warning(f"No panel data for {target_l}"); st.stop()
+        cur_row_l = sym_panel_l.iloc[-1]
 
-    direction_label = ("BULL 🟢" if weighted_dir > 0.3
-                        else "BEAR 🔴" if weighted_dir < -0.3
-                        else "neutral ⚪")
+        # Predict
+        pred_df = lgbm_mod.predict_current(bundle, cur_row_l)
+        if pred_df.empty:
+            st.warning("Model has no horizons populated"); st.stop()
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Short avg (1w-3m)", f"{short_avg:+.2f}%",
-              delta=f"P(+)={p_short:.2f}%")
-    c2.metric("Long avg (6m-12m)",
-              f"{long_avg:+.2f}%" if not np.isnan(long_avg) else "—",
-              delta=f"P(+)={p_long:.2f}%" if not np.isnan(p_long) else "")
-    c3.metric("Conviction", f"{conv*100:.2f}%", delta=direction_label)
+        # ---- Headline trade rec ----
+        st.markdown("## 🎯 Trade Recommendation (LightGBM)")
+        rec_horiz = ["1w", "2w", "3w", "1m", "2m", "3m", "6m", "9m", "12m"]
+        rec_show = pred_df[pred_df["horizon"].isin(rec_horiz)].copy()
+        rec_show["horizon"] = pd.Categorical(rec_show["horizon"], categories=rec_horiz, ordered=True)
+        rec_show = rec_show.sort_values("horizon")
+        cols = st.columns(len(rec_show))
+        for i, (_, r) in enumerate(rec_show.iterrows()):
+            v = float(r["exp_pct"]); pp = float(r["p_positive"]) * 100
+            if v > 1.0: chip = "🟢 BULL"
+            elif v > 0.3: chip = "🟩 lean bull"
+            elif v < -1.0: chip = "🔴 BEAR"
+            elif v < -0.3: chip = "🟥 lean bear"
+            else: chip = "⚪ neutral"
+            cols[i].metric(r["horizon"], f"{v:+.2f}%",
+                           delta=f"{chip}  P(+)={pp:.2f}%")
 
-    # Conviction breakdown caption
-    st.caption(
-        f"**Conviction breakdown** → "
-        f"weighted forecast = `{weighted_dir:+.2f}%` (size factor {direction_mag*100:.2f}%) | "
-        f"avg model quality `{avg_quality if total_w>0 else 0:.3f}` "
-        f"(quality factor {quality_mag*100:.2f}%) | "
-        f"horizon agreement `{int(agree.sum())}/{len(agree)}` "
-        f"({agreement_frac*100:.2f}%) → "
-        f"**{conv*100:.2f}% conviction**"
-    )
+        # ---- Composite aggregates ----
+        short_mask = pred_df["horizon"].isin(["1w","2w","3w","1m","2m","3m"])
+        long_mask = pred_df["horizon"].isin(["6m","9m","12m"])
+        short_avg = float(pred_df.loc[short_mask, "exp_pct"].mean())
+        long_avg = float(pred_df.loc[long_mask, "exp_pct"].mean()) \
+            if long_mask.any() else float("nan")
+        p_short = float(pred_df.loc[short_mask, "p_positive"].mean()) * 100
+        p_long = float(pred_df.loc[long_mask, "p_positive"].mean()) * 100 \
+            if long_mask.any() else float("nan")
 
-    # ---- Forecast bar chart ----
-    st.markdown("##### Per-horizon forecast bars")
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=pred_df["horizon"], y=pred_df["exp_pct"],
-        text=[f"{v:+.2f}%<br>P(+)={p*100:.2f}%"
-              for v, p in zip(pred_df["exp_pct"], pred_df["p_positive"])],
-        textposition="outside",
-        marker_color=["#26A69A" if v >= 0 else "#EF5350" for v in pred_df["exp_pct"]],
-    ))
-    fig.add_hline(y=0, line_color="gray", line_width=1)
-    fig.update_layout(height=420, yaxis_title="Expected return (%)",
-                      xaxis_title="Horizon", showlegend=False,
-                      title=f"{target_l}: LightGBM forecast")
-    st.plotly_chart(fig, use_container_width=True)
+        # ---- Quality-weighted, agreement-aware Conviction ----
+        # 1. Per-horizon quality from OOS IC + AUC (cap negatives at 0)
+        ic_w = pred_df["ic_oos"].clip(lower=0).fillna(0)               # 0..~0.25
+        auc_lift = (pred_df["auc_oos"] - 0.5).clip(lower=0).fillna(0)  # 0..~0.15
+        quality = ic_w * (1 + 4 * auc_lift)                            # combined
 
-    # ---- OOS validation metrics ----
-    st.markdown("##### Walk-forward OOS validation")
-    st.caption("Honest out-of-sample performance from rolling 5y-train / 60d-test folds. "
-               "IC = Spearman corr (regressor pred vs realized fwd return). "
-               "AUC = classifier ROC-AUC. Hit = % of OOS bars where regressor "
-               "sign matched realized sign.")
-    val_df = pred_df[["horizon", "n_oos",
-                      "ic_oos", "r2_oos", "hit_oos",
-                      "auc_oos", "brier_oos",
-                      "ic_clf_oos", "hit_clf_oos",
-                      "log_loss_oos", "pseudo_r2_oos"]].copy()
-    val_df["ic_oos"] = val_df["ic_oos"].round(4)
-    val_df["r2_oos"] = val_df["r2_oos"].round(4)
-    val_df["hit_oos"] = (val_df["hit_oos"] * 100).round(2)
-    val_df["auc_oos"] = val_df["auc_oos"].round(3)
-    val_df["brier_oos"] = val_df["brier_oos"].round(4)
-    val_df["ic_clf_oos"] = val_df["ic_clf_oos"].round(4)
-    val_df["hit_clf_oos"] = (val_df["hit_clf_oos"] * 100).round(2)
-    val_df["log_loss_oos"] = val_df["log_loss_oos"].round(4)
-    val_df["pseudo_r2_oos"] = val_df["pseudo_r2_oos"].round(4)
-    val_df.columns = ["horizon", "n_OOS",
-                      "REG_IC", "REG_R²", "REG_hit_%",
-                      "CLF_AUC", "CLF_Brier",
-                      "CLF_IC", "CLF_hit_%",
-                      "CLF_LogLoss", "CLF_pseudoR²"]
-    st.caption("**REG_*** = regressor metrics (predicting forward realized return). "
-               "**CLF_*** = classifier metrics (predicting P(fwd>0)). "
-               "Columns side-by-side so you can see direction edge from both models.")
-    st.dataframe(
-        val_df.style
-              .background_gradient(subset=["REG_IC"], cmap="RdYlGn", vmin=-0.1, vmax=0.25)
-              .background_gradient(subset=["REG_R²"], cmap="RdYlGn", vmin=-0.05, vmax=0.1)
-              .background_gradient(subset=["REG_hit_%"], cmap="Greens", vmin=45, vmax=80)
-              .background_gradient(subset=["CLF_AUC"], cmap="RdYlGn", vmin=0.45, vmax=0.65)
-              .background_gradient(subset=["CLF_Brier"], cmap="RdYlGn_r", vmin=0.18, vmax=0.27)
-              .background_gradient(subset=["CLF_IC"], cmap="RdYlGn", vmin=-0.1, vmax=0.25)
-              .background_gradient(subset=["CLF_hit_%"], cmap="Greens", vmin=45, vmax=80)
-              .background_gradient(subset=["CLF_LogLoss"], cmap="RdYlGn_r", vmin=0.55, vmax=0.72)
-              .background_gradient(subset=["CLF_pseudoR²"], cmap="RdYlGn", vmin=-0.02, vmax=0.05)
-              .format({"REG_hit_%": "{:.2f}", "CLF_hit_%": "{:.2f}"}),
-        use_container_width=True, hide_index=True,
-    )
+        # 2. Agreement between regressor and classifier
+        sign_reg = np.sign(pred_df["exp_pct"].fillna(0))
+        sign_clf = np.sign(pred_df["p_positive"].fillna(0.5) - 0.5)
+        agree = ((sign_reg * sign_clf) >= 0).astype(float)             # 1 if agree, 0 if conflict
+        eff_w = quality * agree                                        # zero-weight conflicting horizons
 
-    # ---- Feature importance (regressor) ----
-    st.markdown("##### Feature importance — regressor (gain-based)")
-    st.caption("Per-horizon LGBM split-gain importance, normalized to 100% per column. "
-               "Top features = those the model relied on most to predict that horizon.")
-    fi_rows = []
-    for h, m in bundle.horizons.items():
-        total = sum(m.feature_importance_reg.values()) or 1
-        for f, imp in m.feature_importance_reg.items():
-            fi_rows.append({"feature": f, "horizon": h,
-                            "importance": imp / total * 100})
-    fi_df = pd.DataFrame(fi_rows)
-    if not fi_df.empty:
-        fi_pivot = fi_df.pivot(index="feature", columns="horizon", values="importance")
-        # Order rows by mean importance
-        fi_pivot["_avg"] = fi_pivot.mean(axis=1)
-        fi_pivot = fi_pivot.sort_values("_avg", ascending=False).drop(columns="_avg")
-        # Order columns canonically
-        col_order = [h for h in horizon_labels() if h in fi_pivot.columns]
-        fi_pivot = fi_pivot[col_order]
-        st.dataframe(fi_pivot.style.background_gradient(cmap="Greens", vmin=0, vmax=15)
-                     .format("{:.2f}"),
-                     use_container_width=True)
+        # 3. Quality-weighted directional forecast (% units)
+        total_w = float(eff_w.sum())
+        if total_w > 0:
+            weighted_dir = float((pred_df["exp_pct"] * eff_w).sum() / total_w)
+            avg_quality = float(eff_w.sum() / max(agree.sum(), 1))
+            direction_mag = min(abs(weighted_dir) / 2.0, 1.0)          # 2% move → 100%
+            quality_mag = min(avg_quality / 0.10, 1.0)                 # IC*AUClift~0.10 → 100%
+            agreement_frac = float(agree.sum() / len(agree))           # 0..1
+            conv = direction_mag * quality_mag * agreement_frac
+        else:
+            weighted_dir = 0.0
+            direction_mag = quality_mag = agreement_frac = 0.0
+            conv = 0.0
 
-    # ---- Feature importance (classifier) ----
-    with st.expander("Feature importance — classifier"):
-        fi_rows_c = []
+        direction_label = ("BULL 🟢" if weighted_dir > 0.3
+                            else "BEAR 🔴" if weighted_dir < -0.3
+                            else "neutral ⚪")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Short avg (1w-3m)", f"{short_avg:+.2f}%",
+                  delta=f"P(+)={p_short:.2f}%")
+        c2.metric("Long avg (6m-12m)",
+                  f"{long_avg:+.2f}%" if not np.isnan(long_avg) else "—",
+                  delta=f"P(+)={p_long:.2f}%" if not np.isnan(p_long) else "")
+        c3.metric("Conviction", f"{conv*100:.2f}%", delta=direction_label)
+
+        # Conviction breakdown caption
+        st.caption(
+            f"**Conviction breakdown** → "
+            f"weighted forecast = `{weighted_dir:+.2f}%` (size factor {direction_mag*100:.2f}%) | "
+            f"avg model quality `{avg_quality if total_w>0 else 0:.3f}` "
+            f"(quality factor {quality_mag*100:.2f}%) | "
+            f"horizon agreement `{int(agree.sum())}/{len(agree)}` "
+            f"({agreement_frac*100:.2f}%) → "
+            f"**{conv*100:.2f}% conviction**"
+        )
+
+        # ---- Forecast bar chart ----
+        st.markdown("##### Per-horizon forecast bars")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=pred_df["horizon"], y=pred_df["exp_pct"],
+            text=[f"{v:+.2f}%<br>P(+)={p*100:.2f}%"
+                  for v, p in zip(pred_df["exp_pct"], pred_df["p_positive"])],
+            textposition="outside",
+            marker_color=["#26A69A" if v >= 0 else "#EF5350" for v in pred_df["exp_pct"]],
+        ))
+        fig.add_hline(y=0, line_color="gray", line_width=1)
+        fig.update_layout(height=420, yaxis_title="Expected return (%)",
+                          xaxis_title="Horizon", showlegend=False,
+                          title=f"{target_l}: LightGBM forecast")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ---- OOS validation metrics ----
+        st.markdown("##### Walk-forward OOS validation")
+        st.caption("Honest out-of-sample performance from rolling 5y-train / 60d-test folds. "
+                   "IC = Spearman corr (regressor pred vs realized fwd return). "
+                   "AUC = classifier ROC-AUC. Hit = % of OOS bars where regressor "
+                   "sign matched realized sign.")
+        val_df = pred_df[["horizon", "n_oos",
+                          "ic_oos", "r2_oos", "hit_oos",
+                          "auc_oos", "brier_oos",
+                          "ic_clf_oos", "hit_clf_oos",
+                          "log_loss_oos", "pseudo_r2_oos"]].copy()
+        val_df["ic_oos"] = val_df["ic_oos"].round(4)
+        val_df["r2_oos"] = val_df["r2_oos"].round(4)
+        val_df["hit_oos"] = (val_df["hit_oos"] * 100).round(2)
+        val_df["auc_oos"] = val_df["auc_oos"].round(3)
+        val_df["brier_oos"] = val_df["brier_oos"].round(4)
+        val_df["ic_clf_oos"] = val_df["ic_clf_oos"].round(4)
+        val_df["hit_clf_oos"] = (val_df["hit_clf_oos"] * 100).round(2)
+        val_df["log_loss_oos"] = val_df["log_loss_oos"].round(4)
+        val_df["pseudo_r2_oos"] = val_df["pseudo_r2_oos"].round(4)
+        val_df.columns = ["horizon", "n_OOS",
+                          "REG_IC", "REG_R²", "REG_hit_%",
+                          "CLF_AUC", "CLF_Brier",
+                          "CLF_IC", "CLF_hit_%",
+                          "CLF_LogLoss", "CLF_pseudoR²"]
+        st.caption("**REG_*** = regressor metrics (predicting forward realized return). "
+                   "**CLF_*** = classifier metrics (predicting P(fwd>0)). "
+                   "Columns side-by-side so you can see direction edge from both models.")
+        st.dataframe(
+            val_df.style
+                  .background_gradient(subset=["REG_IC"], cmap="RdYlGn", vmin=-0.1, vmax=0.25)
+                  .background_gradient(subset=["REG_R²"], cmap="RdYlGn", vmin=-0.05, vmax=0.1)
+                  .background_gradient(subset=["REG_hit_%"], cmap="Greens", vmin=45, vmax=80)
+                  .background_gradient(subset=["CLF_AUC"], cmap="RdYlGn", vmin=0.45, vmax=0.65)
+                  .background_gradient(subset=["CLF_Brier"], cmap="RdYlGn_r", vmin=0.18, vmax=0.27)
+                  .background_gradient(subset=["CLF_IC"], cmap="RdYlGn", vmin=-0.1, vmax=0.25)
+                  .background_gradient(subset=["CLF_hit_%"], cmap="Greens", vmin=45, vmax=80)
+                  .background_gradient(subset=["CLF_LogLoss"], cmap="RdYlGn_r", vmin=0.55, vmax=0.72)
+                  .background_gradient(subset=["CLF_pseudoR²"], cmap="RdYlGn", vmin=-0.02, vmax=0.05)
+                  .format({"REG_hit_%": "{:.2f}", "CLF_hit_%": "{:.2f}"}),
+            use_container_width=True, hide_index=True,
+        )
+
+        # ---- Feature importance (regressor) ----
+        st.markdown("##### Feature importance — regressor (gain-based)")
+        st.caption("Per-horizon LGBM split-gain importance, normalized to 100% per column. "
+                   "Top features = those the model relied on most to predict that horizon.")
+        fi_rows = []
         for h, m in bundle.horizons.items():
-            if not m.feature_importance_clf: continue
-            total = sum(m.feature_importance_clf.values()) or 1
-            for f, imp in m.feature_importance_clf.items():
-                fi_rows_c.append({"feature": f, "horizon": h,
-                                  "importance": imp / total * 100})
-        if fi_rows_c:
-            fi_c = pd.DataFrame(fi_rows_c).pivot(index="feature", columns="horizon",
-                                                  values="importance")
-            fi_c["_avg"] = fi_c.mean(axis=1)
-            fi_c = fi_c.sort_values("_avg", ascending=False).drop(columns="_avg")
-            col_order = [h for h in horizon_labels() if h in fi_c.columns]
-            fi_c = fi_c[col_order]
-            st.dataframe(fi_c.style.background_gradient(cmap="Greens", vmin=0, vmax=15)
+            total = sum(m.feature_importance_reg.values()) or 1
+            for f, imp in m.feature_importance_reg.items():
+                fi_rows.append({"feature": f, "horizon": h,
+                                "importance": imp / total * 100})
+        fi_df = pd.DataFrame(fi_rows)
+        if not fi_df.empty:
+            fi_pivot = fi_df.pivot(index="feature", columns="horizon", values="importance")
+            # Order rows by mean importance
+            fi_pivot["_avg"] = fi_pivot.mean(axis=1)
+            fi_pivot = fi_pivot.sort_values("_avg", ascending=False).drop(columns="_avg")
+            # Order columns canonically
+            col_order = [h for h in horizon_labels() if h in fi_pivot.columns]
+            fi_pivot = fi_pivot[col_order]
+            st.dataframe(fi_pivot.style.background_gradient(cmap="Greens", vmin=0, vmax=15)
                          .format("{:.2f}"),
                          use_container_width=True)
 
-    # ---- Current input row ----
-    with st.expander("Current input vector (what the model sees)"):
-        cur_dict = {f: float(cur_row_l[f]) if not pd.isna(cur_row_l.get(f)) else None
-                    for f in bundle.features}
-        st.dataframe(pd.DataFrame([cur_dict]).T.rename(columns={0: "value"}),
-                     use_container_width=True)
+        # ---- Feature importance (classifier) ----
+        with st.expander("Feature importance — classifier"):
+            fi_rows_c = []
+            for h, m in bundle.horizons.items():
+                if not m.feature_importance_clf: continue
+                total = sum(m.feature_importance_clf.values()) or 1
+                for f, imp in m.feature_importance_clf.items():
+                    fi_rows_c.append({"feature": f, "horizon": h,
+                                      "importance": imp / total * 100})
+            if fi_rows_c:
+                fi_c = pd.DataFrame(fi_rows_c).pivot(index="feature", columns="horizon",
+                                                      values="importance")
+                fi_c["_avg"] = fi_c.mean(axis=1)
+                fi_c = fi_c.sort_values("_avg", ascending=False).drop(columns="_avg")
+                col_order = [h for h in horizon_labels() if h in fi_c.columns]
+                fi_c = fi_c[col_order]
+                st.dataframe(fi_c.style.background_gradient(cmap="Greens", vmin=0, vmax=15)
+                             .format("{:.2f}"),
+                             use_container_width=True)
+
+        # ---- Current input row ----
+        with st.expander("Current input vector (what the model sees)"):
+            cur_dict = {f: float(cur_row_l[f]) if not pd.isna(cur_row_l.get(f)) else None
+                        for f in bundle.features}
+            st.dataframe(pd.DataFrame([cur_dict]).T.rename(columns={0: "value"}),
+                         use_container_width=True)
 
 
 # ===== Tab 1: Scatter =====

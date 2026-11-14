@@ -36,6 +36,80 @@ FWD_HORIZONS = {
     "12m": 252,
 }
 
+# S&P 500 peak-to-trough dates (inclusive), used for all symbols so pooled
+# return samples are filtered on the same market-wide crisis windows.
+# Source: S&P Dow Jones Indices, "Natural Selection: Tactics and Strategy with
+# Equity Sectors", Appendix C (July 2024).
+CRISIS_WINDOWS = {
+    "tech_bubble": ("Tech bubble", "2000-09-01", "2002-10-09"),
+    "financial_crisis": ("Financial crisis", "2007-10-09", "2009-03-09"),
+    "covid_2020": ("2020 crash", "2020-02-19", "2020-03-23"),
+}
+
+
+def remove_overlapping_returns(panel: pd.DataFrame) -> pd.DataFrame:
+    """Keep non-overlapping forward windows per symbol and horizon.
+
+    A sample at trading-row i covers i through i + horizon bars. The next
+    retained sample may start at i + horizon, sharing only the endpoint price.
+    """
+    if panel.empty:
+        return panel.copy()
+    out = panel.copy()
+    out["_original_order"] = np.arange(len(out))
+    out = out.sort_values(["symbol", "date"])
+    for label, bars in FWD_HORIZONS.items():
+        col = f"fwd_{label}"
+        if col not in out:
+            continue
+        for _, rows in out.groupby("symbol", sort=False):
+            values = rows[col].to_numpy()
+            keep = np.zeros(len(rows), dtype=bool)
+            next_start = 0
+            for i in np.flatnonzero(pd.notna(values)):
+                if i >= next_start:
+                    keep[i] = True
+                    next_start = i + bars
+            out.loc[rows.index[~keep], col] = np.nan
+    return (out.sort_values("_original_order").drop(columns="_original_order")
+            .reset_index(drop=True))
+
+
+def exclude_crisis_windows(panel: pd.DataFrame, selected: tuple[str, ...] | list[str]) -> pd.DataFrame:
+    """Remove selected crisis rows and forward returns whose windows touch them.
+
+    Forward end dates must be found on the full, unfiltered trading calendar.
+    Filtering rows first would incorrectly join prices across the deleted gap.
+    """
+    unknown = set(selected) - CRISIS_WINDOWS.keys()
+    if unknown:
+        raise ValueError(f"unknown crisis window(s): {sorted(unknown)}")
+    if not selected or panel.empty:
+        return panel.copy()
+
+    out = panel.copy()
+    out["_original_order"] = np.arange(len(out))
+    out = out.sort_values(["symbol", "date"])
+    dates = pd.to_datetime(out["date"])
+    windows = [(pd.Timestamp(CRISIS_WINDOWS[key][1]),
+                pd.Timestamp(CRISIS_WINDOWS[key][2])) for key in selected]
+
+    for label, bars in FWD_HORIZONS.items():
+        col = f"fwd_{label}"
+        if col not in out:
+            continue
+        end_dates = pd.to_datetime(out.groupby("symbol", sort=False)["date"].shift(-bars))
+        overlaps = pd.Series(False, index=out.index)
+        for start, end in windows:
+            overlaps |= (dates <= end) & (end_dates >= start)
+        out.loc[overlaps, col] = np.nan
+
+    inside = pd.Series(False, index=out.index)
+    for start, end in windows:
+        inside |= dates.between(start, end)
+    return (out.loc[~inside].sort_values("_original_order")
+            .drop(columns="_original_order").reset_index(drop=True))
+
 
 # Feature catalogue (display name -> column key)
 FEATURES = [

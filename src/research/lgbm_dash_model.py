@@ -28,6 +28,7 @@ from sklearn.metrics import roc_auc_score, r2_score, brier_score_loss, log_loss
 
 from src.research.feature_panel import (
     load_panel, FEATURES, FWD_HORIZONS, RETURN_SCHEMA_VERSION, available_symbols,
+    CRISIS_WINDOWS, exclude_crisis_windows, remove_overlapping_returns,
 )
 
 MODEL_RETURN_SCHEMA_VERSION = RETURN_SCHEMA_VERSION
@@ -134,6 +135,24 @@ class SymbolBundle:
     panel_rows: int = 0
     panel_start: str = ""
     panel_end: str = ""
+    excluded_crises: tuple[str, ...] = ()
+    non_overlapping: bool = False
+
+
+def _crisis_keys(selected: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    unknown = set(selected) - CRISIS_WINDOWS.keys()
+    if unknown:
+        raise ValueError(f"unknown crisis window(s): {sorted(unknown)}")
+    return tuple(key for key in CRISIS_WINDOWS if key in selected)
+
+
+def _model_path(symbol: str, excluded_crises: tuple[str, ...] | list[str] = (),
+                non_overlapping: bool = False) -> Path:
+    keys = _crisis_keys(excluded_crises)
+    suffix = "__exclude_" + "_".join(keys) if keys else ""
+    if non_overlapping:
+        suffix += "__nonoverlap"
+    return MODELS_DIR / f"{symbol}{suffix}.pkl"
 
 
 def _walk_forward_oos(
@@ -195,16 +214,24 @@ def train_symbol(
     symbol: str,
     warmup_days: int = 180 * 6,  # min history before first OOS fold (expanding)
     step_days: int = 60,
+    excluded_crises: tuple[str, ...] | list[str] = (),
+    non_overlapping: bool = False,
 ) -> SymbolBundle:
+    excluded_crises = _crisis_keys(excluded_crises)
     df = load_panel([symbol])
     if df.empty:
         raise ValueError(f"no panel data for {symbol}")
+    if non_overlapping:
+        df = remove_overlapping_returns(df)
+    df = exclude_crisis_windows(df, excluded_crises)
     df = df.sort_values("timestamp").reset_index(drop=True)
     bundle = SymbolBundle(
         symbol=symbol, features=list(FEATURES),
         panel_rows=len(df),
         panel_start=str(df["date"].min()),
         panel_end=str(df["date"].max()),
+        excluded_crises=excluded_crises,
+        non_overlapping=non_overlapping,
     )
 
     for h_label, h_bars in FWD_HORIZONS.items():
@@ -296,6 +323,8 @@ def _bundle_to_dict(b: SymbolBundle) -> dict:
         "panel_rows": b.panel_rows,
         "panel_start": b.panel_start,
         "panel_end": b.panel_end,
+        "excluded_crises": list(b.excluded_crises),
+        "non_overlapping": b.non_overlapping,
         "horizons": {
             h: {
                 "horizon": m.horizon, "bars": m.bars,
@@ -320,6 +349,8 @@ def _dict_to_bundle(d: dict) -> SymbolBundle:
         panel_rows=int(d.get("panel_rows", 0)),
         panel_start=str(d.get("panel_start", "")),
         panel_end=str(d.get("panel_end", "")),
+        excluded_crises=tuple(d.get("excluded_crises", ())),
+        non_overlapping=bool(d.get("non_overlapping", False)),
     )
     for h, mh in d.get("horizons", {}).items():
         # Backward-compat: old pickles stored single reg_model/clf_model.
@@ -350,19 +381,23 @@ def _dict_to_bundle(d: dict) -> SymbolBundle:
 
 
 def save_bundle(bundle: SymbolBundle) -> Path:
-    out = MODELS_DIR / f"{bundle.symbol}.pkl"
+    out = _model_path(bundle.symbol, bundle.excluded_crises, bundle.non_overlapping)
     with open(out, "wb") as f:
         pickle.dump(_bundle_to_dict(bundle), f)
     return out
 
 
-def load_bundle(symbol: str) -> SymbolBundle | None:
-    p = MODELS_DIR / f"{symbol}.pkl"
+def load_bundle(symbol: str, excluded_crises: tuple[str, ...] | list[str] = (),
+                non_overlapping: bool = False) -> SymbolBundle | None:
+    keys = _crisis_keys(excluded_crises)
+    p = _model_path(symbol, keys, non_overlapping)
     if not p.exists():
         return None
     with open(p, "rb") as f:
         obj = pickle.load(f)
-    if isinstance(obj, dict) and obj.get("return_type") == RETURN_SCHEMA_VERSION:
+    if (isinstance(obj, dict) and obj.get("return_type") == RETURN_SCHEMA_VERSION
+            and tuple(obj.get("excluded_crises", ())) == keys
+            and bool(obj.get("non_overlapping", False)) == non_overlapping):
         return _dict_to_bundle(obj)
     # Older model targets/features used log returns; never score them as simple returns.
     return None
@@ -372,10 +407,19 @@ def is_trained(symbol: str) -> bool:
     return (MODELS_DIR / f"{symbol}.pkl").exists()
 
 
-def list_trained() -> list[str]:
+def list_trained(excluded_crises: tuple[str, ...] | list[str] = (),
+                 non_overlapping: bool = False) -> list[str]:
     if not MODELS_DIR.exists():
         return []
-    return sorted(p.stem for p in MODELS_DIR.glob("*.pkl"))
+    keys = _crisis_keys(excluded_crises)
+    suffix = "__exclude_" + "_".join(keys) if keys else ""
+    if non_overlapping:
+        suffix += "__nonoverlap"
+    if suffix:
+        return sorted(p.stem[:-len(suffix)] for p in MODELS_DIR.glob(f"*{suffix}.pkl")
+                      if "__exclude_" not in p.stem[:-len(suffix)])
+    return sorted(p.stem for p in MODELS_DIR.glob("*.pkl")
+                  if "__exclude_" not in p.stem and "__nonoverlap" not in p.stem)
 
 
 def predict_current(bundle: SymbolBundle, current_row: pd.Series) -> pd.DataFrame:

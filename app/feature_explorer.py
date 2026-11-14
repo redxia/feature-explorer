@@ -35,6 +35,9 @@ from src.research import feature_panel as _feature_panel  # noqa: E402
 if (not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS)
         or getattr(_feature_panel, "RETURN_SCHEMA_VERSION", None) != "simple_v1"
         or not hasattr(_feature_panel, "remove_overlapping_returns")
+        or not hasattr(_feature_panel, "conditional_forward_returns")
+        or not {"downgrade_2011", "tariffs_2018", "bear_2022"}.issubset(
+            getattr(_feature_panel, "CRISIS_WINDOWS", {}))
         or getattr(_feature_panel, "MODULE_SOURCE_MTIME_NS", None)
            != Path(_feature_panel.__file__).stat().st_mtime_ns):
     importlib.reload(_feature_panel)

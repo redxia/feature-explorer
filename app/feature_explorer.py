@@ -42,7 +42,7 @@ if (not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS)
 from src.research.feature_panel import (  # noqa: E402
     load_panel, available_symbols, feature_columns, horizon_labels,
     FWD_HORIZONS, RETURN_SCHEMA_VERSION, CRISIS_WINDOWS,
-    exclude_crisis_windows, remove_overlapping_returns,
+    exclude_crisis_windows, remove_overlapping_returns, conditional_forward_returns,
 )
 
 st.set_page_config(page_title="Feature Explorer", layout="wide")
@@ -344,9 +344,9 @@ if st.sidebar.button("♻️ Refresh + retrain permanently (GitHub)",
 
 # ---------- tabs ----------
 
-(tab_lgbm, tab_dash, tab_scatter, tab_scenario, tab_corr, tab_buckets,
+(tab_dash, tab_lgbm, tab_scatter, tab_scenario, tab_corr, tab_buckets,
  tab_regime) = st.tabs([
-    "🤖 LightGBM Signal Dashboard", "Signal Dashboard (empirical)",
+    "Signal Dashboard (empirical)", "🤖 LightGBM Signal Dashboard",
     "Scatter vs fwd returns", "What-if scenario",
     "Correlation matrix", "Quantile buckets", "🌡️ Vol Regimes (HMM)"
 ])
@@ -407,9 +407,9 @@ what horizon, based on where its features sit *right now* relative to the past
 **How it works in 3 steps:**
 1. **Read current state.** Take latest daily bar of the target symbol. Pull every
    feature value (RSI, distance from moving averages, volatility, drawdown, etc.).
-2. **Look up history.** For each feature, find every past day where this feature
-   was within ±0.5 standard deviations of the current value. Average what
-   actually happened in the next 1 week, 2 weeks, ..., 12 months.
+2. **Look up history.** For each feature, find past days where this feature
+   was within ±0.5 standard deviations of the current value. If fewer than
+   five match, use the five closest days. Average what happened over each horizon.
 3. **Combine signals.** Weight each feature's forecast by its historical
    correlation strength (|Spearman ρ|). Strong-edge features count more. Sum
    into one expected % return per horizon.
@@ -435,6 +435,13 @@ news, regime change, or tail events.
     if target_panel.empty:
         st.warning("No data for target"); st.stop()
     cur = target_panel.iloc[-1]
+    sparse_horizons = [(h, int(target_panel[f"fwd_{h}"].notna().sum()))
+                       for h in ("2m", "3m", "6m", "9m", "12m")
+                       if target_panel[f"fwd_{h}"].notna().sum() < 30]
+    if sparse_horizons:
+        st.warning("Limited historical samples after filters: " +
+                   ", ".join(f"{h} ({n})" for h, n in sparse_horizons) +
+                   ". Long-horizon estimates are noisy.")
 
     # Feature signal direction priors from full sample (signed Spearman)
     feats_all = feature_columns()
@@ -453,15 +460,14 @@ news, regime change, or tail events.
         for h in horizon_labels():
             col = f"fwd_{h}"
             sub = target_panel.dropna(subset=[f, col])
-            if len(sub) < 100:
+            if len(sub) < 10:
                 per_horizon[h] = {"sp": np.nan, "mean_fwd": np.nan, "n": 0,
                                   "pct_green": np.nan, "pct_red": np.nan,
                                   "median_fwd": np.nan}
                 continue
             sp = float(spearmanr(sub[f], sub[col]).statistic)
-            # Empirical fwd return when feature within ±0.5σ of current value
-            tol = sub[f].std() * 0.5
-            window = sub[(sub[f] > cur_val - tol) & (sub[f] < cur_val + tol)][col]
+            # Use nearest historical matches when the ±0.5σ band is too sparse.
+            window = conditional_forward_returns(sub, f, col, cur_val)
             if len(window):
                 mean_fwd = float(window.mean())
                 median_fwd = float(window.median())
@@ -486,7 +492,7 @@ news, regime change, or tail events.
     for fs in feat_stats:
         for h, ph in fs["per_horizon"].items():
             sp, mean_fwd, n, green = ph["sp"], ph["mean_fwd"], ph["n"], ph["pct_green"]
-            if np.isnan(sp) or np.isnan(mean_fwd) or n < 30:
+            if np.isnan(sp) or np.isnan(mean_fwd) or n < 5:
                 continue
             w = abs(sp)
             composite[h]["wfwd"] += w * mean_fwd

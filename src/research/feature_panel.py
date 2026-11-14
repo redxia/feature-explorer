@@ -117,6 +117,19 @@ def exclude_crisis_windows(panel: pd.DataFrame, selected: tuple[str, ...] | list
             .drop(columns="_original_order").reset_index(drop=True))
 
 
+def conditional_forward_returns(sub: pd.DataFrame, feature: str, target: str,
+                                current_value: float, min_matches: int = 5) -> pd.Series:
+    """Return nearby historical targets, widening to the nearest rows if sparse."""
+    if sub.empty:
+        return pd.Series(dtype=float)
+    distance = (sub[feature] - current_value).abs()
+    tolerance = sub[feature].std() * 0.5
+    window = sub.loc[distance < tolerance, target]
+    if len(window) >= min_matches:
+        return window
+    return sub.loc[distance.nsmallest(min(min_matches, len(sub))).index, target]
+
+
 # Feature catalogue (display name -> column key)
 FEATURES = [
     "rsi_14",

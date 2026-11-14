@@ -29,12 +29,14 @@ from scipy.stats import spearmanr
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-# Streamlit can rerun this script while retaining the feature module from an
-# earlier deployment. Reload it if the new month horizons are missing.
+# Streamlit can rerun this script while retaining modules from an earlier
+# deployment. Reload the feature module whenever its source file changes.
 from src.research import feature_panel as _feature_panel  # noqa: E402
 if (not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS)
         or getattr(_feature_panel, "RETURN_SCHEMA_VERSION", None) != "simple_v1"
-        or not hasattr(_feature_panel, "remove_overlapping_returns")):
+        or not hasattr(_feature_panel, "remove_overlapping_returns")
+        or getattr(_feature_panel, "MODULE_SOURCE_MTIME_NS", None)
+           != Path(_feature_panel.__file__).stat().st_mtime_ns):
     importlib.reload(_feature_panel)
 
 from src.research.feature_panel import (  # noqa: E402
@@ -751,7 +753,10 @@ count more (|ρ| weighting).*
 with tab_lgbm:
     from src.research import lgbm_dash_model as lgbm_mod
     if (getattr(lgbm_mod, "MODEL_RETURN_SCHEMA_VERSION", None) != RETURN_SCHEMA_VERSION
-            or "non_overlapping" not in lgbm_mod.SymbolBundle.__dataclass_fields__):
+            or "non_overlapping" not in lgbm_mod.SymbolBundle.__dataclass_fields__
+            or getattr(lgbm_mod, "MODULE_SOURCE_MTIME_NS", None)
+               != Path(lgbm_mod.__file__).stat().st_mtime_ns
+            or lgbm_mod.CRISIS_WINDOWS != CRISIS_WINDOWS):
         importlib.reload(lgbm_mod)
 
     st.subheader("🤖 LightGBM Signal Dashboard")

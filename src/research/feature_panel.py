@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+MODULE_SOURCE_MTIME_NS = Path(__file__).stat().st_mtime_ns
 
 DAILY_DIR = Path(__file__).resolve().parents[2] / "data" / "raw" / "daily"
 RETURN_SCHEMA_VERSION = "simple_v1"

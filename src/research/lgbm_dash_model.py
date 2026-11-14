@@ -35,6 +35,7 @@ MODEL_RETURN_SCHEMA_VERSION = RETURN_SCHEMA_VERSION
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logger = logging.getLogger(__name__)
+MODULE_SOURCE_MTIME_NS = Path(__file__).stat().st_mtime_ns
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "lgbm_dash"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)

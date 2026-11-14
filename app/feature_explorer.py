@@ -619,7 +619,7 @@ exactly where the edge sits.*
         subset=exp_cols, cmap="RdYlGn", vmin=-3, vmax=3
     ).background_gradient(
         subset=win_cols, cmap="Greens", vmin=40, vmax=70
-    ).format({c: "{:.2f}" for c in exp_cols + win_cols})
+    ).format({c: "{:.2f}" for c in exp_cols + win_cols}, na_rep="N/A")
     st.dataframe(sty, use_container_width=True)
 
     st.divider()
@@ -682,7 +682,7 @@ exactly where the edge sits.*
         subset=p_exp, cmap="RdYlGn", vmin=-3, vmax=3
     ).background_gradient(
         subset=p_win, cmap="Greens", vmin=40, vmax=70
-    ).format({c: "{:.2f}" for c in p_exp + p_win})
+    ).format({c: "{:.2f}" for c in p_exp + p_win}, na_rep="N/A")
     st.dataframe(sty, use_container_width=True, hide_index=True)
 
     # ---- panel B: composite forecast bars ----

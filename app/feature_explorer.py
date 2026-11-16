@@ -36,7 +36,7 @@ if (not {"4m", "5m"}.issubset(_feature_panel.FWD_HORIZONS)
         or getattr(_feature_panel, "RETURN_SCHEMA_VERSION", None) != "simple_v1"
         or not hasattr(_feature_panel, "remove_overlapping_returns")
         or not hasattr(_feature_panel, "conditional_forward_returns")
-        or not {"downgrade_2011", "tariffs_2018", "bear_2022"}.issubset(
+        or not {"downgrade_2011", "tariffs_2018", "bear_2022", "tariffs_2025"}.issubset(
             getattr(_feature_panel, "CRISIS_WINDOWS", {}))
         or getattr(_feature_panel, "MODULE_SOURCE_MTIME_NS", None)
            != Path(_feature_panel.__file__).stat().st_mtime_ns):
@@ -103,6 +103,7 @@ panel = pd.concat([cached_per_symbol(s, _ver, tuple(FWD_HORIZONS.items()),
                    for s in selected_syms],
                   ignore_index=True)
 latest_panel = panel
+raw_panel = panel
 
 # ---------- data freshness banner ----------
 _latest = pd.to_datetime(panel["date"].max()).date()
@@ -129,9 +130,11 @@ date_range = st.sidebar.date_input(
     max_value=max_date.date(),
 )
 non_overlapping = st.sidebar.checkbox(
-    "Non-overlapping return windows", value=True,
+    "Non-overlapping return windows", value=False,
+    key="non_overlapping_returns_v2",
     help="For each symbol and horizon, retain forward-return samples at least "
-         "one full horizon apart.")
+         "one full horizon apart. A 12-month horizon then yields roughly one "
+         "sample per year per symbol.")
 st.sidebar.subheader("Exclude historical periods")
 excluded_crises = tuple(key for key, (label, start, end) in CRISIS_WINDOWS.items()
                         if st.sidebar.checkbox(
@@ -154,6 +157,15 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
 if panel.empty:
     st.warning("No data remains after the date and crisis filters.")
     st.stop()
+
+sample_counts = pd.DataFrame({
+    "Horizon": list(FWD_HORIZONS),
+    "Available": [int(raw_panel[f"fwd_{h}"].notna().sum()) for h in FWD_HORIZONS],
+    "After filters": [int(panel[f"fwd_{h}"].notna().sum()) for h in FWD_HORIZONS],
+})
+with st.sidebar.expander("Return sample counts"):
+    st.dataframe(sample_counts, hide_index=True, use_container_width=True)
+    st.caption("Counts precede feature-specific missing-value filters.")
 
 plot_horizons = [h for h in ("1m", "2m", "3m", "4m", "5m", "6m", "9m", "12m")
                  if h in FWD_HORIZONS]
